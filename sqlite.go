@@ -11,9 +11,12 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
+
+var driverSeq atomic.Uint64
 
 // Mode determines the replication strategy.
 type Mode string
@@ -41,6 +44,9 @@ type Config struct {
 	Threshold  int              // t value (signatures required)
 	Parties    int              // n value (total parties)
 	SigningKey ed25519.PrivateKey // this node's signing key
+
+	// Internal: set by WithPrincipalKey if derivation fails.
+	derivationErr error
 }
 
 // Option configures a database.
@@ -104,12 +110,15 @@ func Open(path string, opts ...Option) (*DB, error) {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	if cfg.derivationErr != nil {
+		return nil, cfg.derivationErr
+	}
 
 	// Build sqlcipher connection string
 	dsn := buildDSN(path, &cfg)
 
-	// Register driver with sqlcipher pragmas
-	driverName := fmt.Sprintf("sqlite3_hanzo_%s", path)
+	// Register driver with sqlcipher pragmas (unique name per Open call)
+	driverName := fmt.Sprintf("sqlite3_hanzo_%d", driverSeq.Add(1))
 	sql.Register(driverName, &sqlite3.SQLiteDriver{
 		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
 			return applyCipherPragmas(conn, &cfg)
