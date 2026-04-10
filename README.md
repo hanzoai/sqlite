@@ -100,6 +100,23 @@ replace modernc.org/sqlite => github.com/hanzoai/sqlite v0.1.0
 
 Base gets encryption at rest + distribution for free. No code changes needed.
 
+## Per-Principal CEK
+
+Each org or user gets a unique 256-bit content encryption key (CEK) derived via
+HKDF-SHA256:
+
+```go
+// DeriveKey(masterKey, principalType, principalID) → 32-byte CEK
+db, err := sqlite.Open("data.db",
+    sqlite.WithPrincipalKey(masterKey, PrincipalOrg, "my-org"),
+)
+```
+
+- `DeriveKey(masterKey, principalType, principalID)` uses HKDF-SHA256
+- Master key stored in KMS (`ENCRYPTION_MASTER_KEY` env)
+- Used by IAM, KMS, ATS, BD, TA for per-tenant isolation
+- Destroying the master key renders all derived CEKs irrecoverable
+
 ## License
 
 Apache-2.0
