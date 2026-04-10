@@ -8,6 +8,7 @@ package sqlite
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -31,7 +32,6 @@ const (
 // Config for opening a database.
 type Config struct {
 	// Encryption
-	Key    string // passphrase for sqlcipher KDF
 	RawKey []byte // raw 256-bit key (skips KDF)
 
 	// Replication
@@ -52,9 +52,13 @@ type Config struct {
 // Option configures a database.
 type Option func(*Config)
 
-// WithKey sets the sqlcipher passphrase.
+// WithKey derives a raw 256-bit key from a passphrase via SHA-256
+// and configures sqlcipher to use it directly (skipping KDF).
 func WithKey(passphrase string) Option {
-	return func(c *Config) { c.Key = passphrase }
+	return func(c *Config) {
+		h := sha256.Sum256([]byte(passphrase))
+		c.RawKey = h[:]
+	}
 }
 
 // WithRawKey sets a raw 256-bit encryption key (skips KDF).
@@ -155,11 +159,6 @@ func applyCipherPragmas(conn *sqlite3.SQLiteConn, cfg *Config) error {
 		hexKey := fmt.Sprintf("\"x'%x'\"", cfg.RawKey)
 		if _, err := conn.Exec("PRAGMA key = "+hexKey, nil); err != nil {
 			return fmt.Errorf("sqlite: set raw key: %w", err)
-		}
-	} else if cfg.Key != "" {
-		// Passphrase — sqlcipher runs PBKDF2
-		if _, err := conn.Exec(fmt.Sprintf("PRAGMA key = '%s'", cfg.Key), nil); err != nil {
-			return fmt.Errorf("sqlite: set key: %w", err)
 		}
 	}
 
