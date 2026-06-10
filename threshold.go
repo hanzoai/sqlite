@@ -4,7 +4,7 @@
 // t-of-n parties to sign the write before it's committed. Reads are local.
 //
 // Use case: MPC wallet shard storage, DEX trade approvals, multi-sig
-// transaction authorization in liquidity/ats.
+// transaction authorization in trading platforms.
 package sqlite
 
 import (
