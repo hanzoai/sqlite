@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
@@ -83,6 +84,11 @@ func openDB(path string, cfg *Config) (*sql.DB, error) {
 // rawKey must be exactly 32 bytes when non-nil (validated by Open; OpenDB
 // trusts its caller). A nil key yields an unencrypted DSN for the global/dev/test
 // engine.
+//
+// The path is percent-escaped (escapeDBPath): a path containing '?' or '#'
+// would otherwise prematurely terminate the file portion of the DSN and DROP the
+// trailing query params — including `key=` — which would silently open the
+// database UNENCRYPTED. Escaping makes that impossible regardless of caller input.
 func DSN(path string, rawKey []byte) string {
 	params := []string{
 		"_busy_timeout=10000",
@@ -92,9 +98,25 @@ func DSN(path string, rawKey []byte) string {
 	}
 	if rawKey != nil {
 		// SQLCipher raw-key blob literal: x'..' => no passphrase KDF. Hex is
-		// URL-safe so no escaping is needed; the single quotes are sub-delims,
-		// legal in a URI query value.
+		// URL-safe; the single quotes are sub-delims, legal in a URI query value.
 		params = append(params, fmt.Sprintf("key=x'%x'", rawKey))
+	} else {
+		// cache=shared ONLY on the unencrypted path (parity with the legacy
+		// global/dev DSN). It is a SECURITY HAZARD on keyed databases: the
+		// shared in-process page cache holds DECRYPTED pages, so a later
+		// connection opened with the WRONG key reads cached plaintext instead
+		// of being rejected — defeating per-key isolation. Never share the
+		// cache across an encrypted file.
+		params = append(params, "cache=shared")
 	}
-	return fmt.Sprintf("file:%s?%s", path, strings.Join(params, "&"))
+	return fmt.Sprintf("file:%s?%s", escapeDBPath(path), strings.Join(params, "&"))
+}
+
+// escapeDBPath percent-encodes a filesystem path for safe embedding in the
+// opaque portion of a `file:PATH?query` SQLite DSN. It preserves '/' (path
+// separators stay readable) but escapes '?' and '#' (and any other reserved
+// character) so they can never terminate the path early and strip query params.
+func escapeDBPath(path string) string {
+	// url.PathEscape escapes '?' and '#' but also escapes '/'; restore '/'.
+	return strings.ReplaceAll(url.PathEscape(path), "%2F", "/")
 }
