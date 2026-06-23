@@ -1,5 +1,3 @@
-//go:build cgo
-
 // Per-principal CEK derivation via HKDF.
 //
 // Each org/user gets a unique 256-bit Content Encryption Key derived from:
