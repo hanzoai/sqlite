@@ -1,5 +1,3 @@
-//go:build cgo
-
 // Threshold write attestation for multi-party SQLite.
 //
 // Each party runs a node with a full replica. Write operations require
