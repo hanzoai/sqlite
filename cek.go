@@ -57,6 +57,22 @@ const dekLen = 32
 // blob. Bump only if the wrapping scheme changes.
 const wrapVersion = 1
 
+// PrincipalAAD returns the injective binding context for a principal, suitable
+// as the AES-256-GCM additional-authenticated-data when wrapping that
+// principal's DEK (WrapDEK/UnwrapDEK). It is the SAME length-prefixed, injective
+// encoding used for the KEK's HKDF info — one encoding, two uses (DRY):
+//
+//   - HKDF info  → domain-separates the KEK per principal.
+//   - GCM AAD    → binds the wrapped blob to its principal, so a sidecar lifted
+//     from one principal can never be unwrapped under another even if a KEK
+//     derivation ever collided. Defense-in-depth atop the KEK separation.
+//
+// Pass the value to WrapDEK/UnwrapDEK; the same (type,id) MUST be used to wrap
+// and to unwrap, or the GCM tag check fails.
+func PrincipalAAD(principalType PrincipalType, principalID string) []byte {
+	return lengthPrefixedInfo(principalType, principalID)
+}
+
 // lengthPrefixedInfo builds an injective HKDF `info` from (principalType, id):
 //
 //	uvarint(len(type)) || type || uvarint(len(id)) || id
@@ -132,7 +148,14 @@ func NewDEK() ([]byte, error) {
 // blob: version(1) || nonce(12) || ciphertext||tag. The KEK must be 32 bytes
 // (as produced by DeriveKey / DeriveChildKey). The blob is safe to store
 // next to the database; it reveals nothing about the DEK without the KEK.
-func WrapDEK(kek, dek []byte) ([]byte, error) {
+//
+// aad is additional binding context authenticated (but not encrypted) by GCM —
+// pass PrincipalAAD(type,id) so the blob is cryptographically bound to its
+// principal (a sidecar moved to another principal fails the tag, defense-in-depth
+// atop the per-principal KEK). The same aad MUST be supplied to UnwrapDEK. Pass
+// nil for an unbound blob (e.g. the standalone Open() helper). The on-disk AAD is
+// version-byte || aad, so a downgrade is also unforgeable.
+func WrapDEK(kek, dek, aad []byte) ([]byte, error) {
 	if len(kek) != 32 {
 		return nil, fmt.Errorf("sqlite/cek: KEK must be 32 bytes, got %d", len(kek))
 	}
@@ -147,18 +170,18 @@ func WrapDEK(kek, dek []byte) ([]byte, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("sqlite/cek: generate nonce: %w", err)
 	}
-	// AAD binds the version so a downgrade can't be forged.
 	out := make([]byte, 0, 1+len(nonce)+len(dek)+gcm.Overhead())
 	out = append(out, wrapVersion)
 	out = append(out, nonce...)
-	out = gcm.Seal(out, nonce, dek, []byte{wrapVersion})
+	out = gcm.Seal(out, nonce, dek, wrapAAD(aad))
 	return out, nil
 }
 
-// UnwrapDEK opens a blob produced by WrapDEK under the same KEK. A wrong KEK,
-// truncated blob, or tampered ciphertext fails the GCM tag and returns an error
-// — never a partial/garbage key.
-func UnwrapDEK(kek, blob []byte) ([]byte, error) {
+// UnwrapDEK opens a blob produced by WrapDEK under the same KEK and the same aad.
+// A wrong KEK, wrong aad (e.g. a sidecar from a different principal), truncated
+// blob, or tampered ciphertext fails the GCM tag and returns an error — never a
+// partial/garbage key.
+func UnwrapDEK(kek, blob, aad []byte) ([]byte, error) {
 	if len(kek) != 32 {
 		return nil, fmt.Errorf("sqlite/cek: KEK must be 32 bytes, got %d", len(kek))
 	}
@@ -175,14 +198,23 @@ func UnwrapDEK(kek, blob []byte) ([]byte, error) {
 	}
 	nonce := blob[1 : 1+ns]
 	ct := blob[1+ns:]
-	dek, err := gcm.Open(nil, nonce, ct, []byte{wrapVersion})
+	dek, err := gcm.Open(nil, nonce, ct, wrapAAD(aad))
 	if err != nil {
-		return nil, fmt.Errorf("sqlite/cek: unwrap DEK (wrong key or corrupt blob): %w", err)
+		return nil, fmt.Errorf("sqlite/cek: unwrap DEK (wrong key, wrong principal, or corrupt blob): %w", err)
 	}
 	if len(dek) != dekLen {
 		return nil, fmt.Errorf("sqlite/cek: unwrapped DEK has wrong length %d", len(dek))
 	}
 	return dek, nil
+}
+
+// wrapAAD composes the GCM additional-authenticated-data: the wrap version byte
+// (binds against downgrade) followed by the caller's principal-binding aad.
+func wrapAAD(aad []byte) []byte {
+	out := make([]byte, 0, 1+len(aad))
+	out = append(out, wrapVersion)
+	out = append(out, aad...)
+	return out
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {
