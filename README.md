@@ -1,121 +1,94 @@
 # Hanzo SQLite
 
-Distributed SQLite with sqlcipher encryption, CRDT replication, and Raft consensus.
+Dual-backend SQLite driver for the Hanzo ecosystem. Registers the
+`database/sql` driver name **`sqlite`** under both build configurations and
+exposes the same API either way:
 
-Drop-in replacement for `modernc.org/sqlite` in Hanzo Base with:
-- **Encryption at rest**: sqlcipher (AES-256-CBC page-level encryption)
-- **Distributed replication**: Raft consensus for multi-node (LiteFS-style)
-- **CRDT sync**: conflict-free replicated data types for eventual consistency
-- **Multi-party sharding**: each party runs a node, threshold for writes
+| Build | Backend | Encryption | Use |
+|-------|---------|------------|-----|
+| `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | mattn/go-sqlite3 → SQLCipher | AES-256 page-level, at rest | **production** |
+| `CGO_ENABLED=0` | modernc.org/sqlite (pure Go) | none | CI tests / lint / local dev |
 
-## Architecture
+One import, one driver name, two backends:
 
-```
-┌─────────────────────────────────────────────┐
-│              Hanzo SQLite Node               │
-├─────────────────────────────────────────────┤
-│  Application (Hanzo Base)                    │
-│    ↕ database/sql driver                    │
-│  SQLCipher Engine (AES-256-CBC pages)       │
-│    ↕ WAL intercept                          │
-│  Replication Layer                           │
-│    ├─ Raft (strong consistency, writes)     │
-│    └─ CRDT (eventual consistency, reads)    │
-│    ↕ ZAP transport                          │
-│  Peer Discovery (mDNS or explicit)          │
-└─────────────────────────────────────────────┘
+```go
+import _ "github.com/hanzoai/sqlite" // registers "sqlite" under both tags
+
+db, _ := sql.Open("sqlite", dsn)     // mattn+SQLCipher (cgo) or modernc (!cgo)
 ```
 
-## Modes
+The pure-Go backend **cannot encrypt**. Demanding a key on it
+(`Open(path, WithKey(...))`, `OpenDB(path, key)`) returns
+`ErrEncryptionUnavailable` and writes nothing — it never silently persists
+plaintext.
 
-| Mode | Consistency | Use Case |
-|------|-------------|----------|
-| `single` | Local only | Development, single-instance prod |
-| `raft` | Strong (leader writes) | Multi-node KMS, MPC state |
-| `crdt` | Eventual (all write) | Edge sync, offline-first apps |
-| `threshold` | t-of-n attest writes | MPC wallet shards, multi-party |
+## Building the encrypted (production) backend — READ THIS
 
-## Multi-Party Threshold Mode
+mainline `mattn/go-sqlite3` has **no `sqlcipher` build tag** and no
+`sqlite3_key()` binding. SQLCipher works only when you:
 
-Multiple parties each run a node. Write operations require t-of-n attestations:
+1. link the **system** sqlite (the `libsqlite3` tag) against **libsqlcipher**, and
+2. enable the codec + URI keying via CGO flags, and
+3. supply the key as SQLCipher's **native URI `key` parameter** so it is applied
+   inside `sqlite3_open_v2` — *before* mattn's pragma battery runs.
 
+```sh
+CGO_ENABLED=1 \
+CGO_CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 -I<sqlcipher>/include/sqlcipher" \
+CGO_LDFLAGS="-L<sqlcipher>/lib -lsqlcipher" \
+go build -tags "libsqlite3 sqlite_fts5" ./...
 ```
-Party A (node-0) ──┐
-Party B (node-1) ──┼── 2-of-3 attest ──→ write committed
-Party C (node-2) ──┘
-```
 
-Each party signs their attestation locally. Simple 2/3 threshold for writes.
-Reads are local (each node has a full replica).
+Alpine: `apk add gcc musl-dev sqlcipher-dev pkgconfig`.
+
+### Why not `-tags sqlcipher` + `PRAGMA key` in a ConnectHook?
+
+Both are traps that ship **plaintext**:
+
+- `-tags sqlcipher` is inert in mainline mattn (no such tag) → links plain
+  sqlite → `PRAGMA key` is a silent no-op.
+- mattn runs `PRAGMA busy_timeout/journal_mode/foreign_keys/...` via
+  `sqlite3_exec` **before** the ConnectHook fires. On an existing encrypted file
+  that touches the header before the key is set → `file is not a database` on
+  reopen. So a ConnectHook can *create* but never *reopen* a SQLCipher DB.
+
+The URI `key` parameter sidesteps both: SQLCipher's VFS keys the connection at
+open time. `TestEncryptionProof` asserts real ciphertext on disk and a working
+keyed reopen, so a mis-linked build **fails CI** instead of shipping plaintext.
+
+> The key rides the DSN (`file:PATH?...&key=x'HEX'`). **Never log the DSN.**
+> IAM keeps `showSql=false` and does not log it.
 
 ## Encryption
 
-SQLCipher provides transparent page-level encryption:
-- Algorithm: AES-256-CBC
-- KDF: PBKDF2-HMAC-SHA512 (256K iterations)
-- HMAC: SHA-512 per-page integrity
-- Key: derived from passphrase or provided as raw 256-bit key
+- Algorithm: AES-256 (SQLCipher 4 defaults: 4096-byte pages, PBKDF2-HMAC-SHA512,
+  256000 iters, per-page HMAC-SHA512).
+- Key: raw 256-bit (no passphrase KDF) via `WithRawKey` / the `key=x'HEX'` DSN
+  param, or derived per principal:
 
 ```go
-db, err := sqlite.Open("data.db", sqlite.WithKey("my-passphrase"))
-// or
-db, err := sqlite.Open("data.db", sqlite.WithRawKey(keyBytes))
+// CEK = HKDF-SHA256(masterKey, "{org|user}:{id}")
+db, _ := sqlite.Open("data.db", sqlite.WithPrincipalKey(masterKey, sqlite.PrincipalOrg, "acme"))
+
+// Or get a *sql.DB to hand to xorm.NewEngineWithDB:
+cek, _ := sqlite.DeriveKey(masterKey, sqlite.PrincipalOrg, "acme")
+sqldb, _ := sqlite.OpenDB(dbPath, cek)
+eng, _ := xorm.NewEngineWithDB("sqlite", "", core.FromDB(sqldb))
 ```
 
-## Usage
+Different orgs/users get different CEKs (domain-separated `info`); destroying the
+master key renders every derived CEK irrecoverable.
 
-```go
-import "github.com/hanzoai/sqlite"
+## Per-principal CEK
 
-// Single node (encrypted)
-db, err := sqlite.Open("data.db", sqlite.WithKey("passphrase"))
+`DeriveKey(masterKey, principalType, principalID)` → 32-byte CEK via HKDF-SHA256.
+Master key is 32 bytes, sourced from KMS. Used for per-org and per-user database
+isolation in IAM, KMS, and other Hanzo services.
 
-// Raft cluster (3 nodes, encrypted)
-db, err := sqlite.Open("data.db",
-    sqlite.WithKey("passphrase"),
-    sqlite.WithRaft("node-0", ":4001", []string{
-        "node-1:4001",
-        "node-2:4001",
-    }),
-)
+## Threshold write attestation
 
-// Threshold mode (2-of-3 for writes)
-db, err := sqlite.Open("data.db",
-    sqlite.WithKey("passphrase"),
-    sqlite.WithThreshold(2, 3, mySigningKey),
-    sqlite.WithPeers([]string{
-        "node-1:4001",
-        "node-2:4001",
-    }),
-)
-```
-
-## Integration with Hanzo Base
-
-Replace `modernc.org/sqlite` in Base's `go.mod`:
-
-```
-replace modernc.org/sqlite => github.com/hanzoai/sqlite v0.1.0
-```
-
-Base gets encryption at rest + distribution for free. No code changes needed.
-
-## Per-Principal CEK
-
-Each org or user gets a unique 256-bit content encryption key (CEK) derived via
-HKDF-SHA256:
-
-```go
-// DeriveKey(masterKey, principalType, principalID) → 32-byte CEK
-db, err := sqlite.Open("data.db",
-    sqlite.WithPrincipalKey(masterKey, PrincipalOrg, "my-org"),
-)
-```
-
-- `DeriveKey(masterKey, principalType, principalID)` uses HKDF-SHA256
-- Master key stored in KMS (`ENCRYPTION_MASTER_KEY` env)
-- Used by IAM, KMS, ATS, BD, TA for per-tenant isolation
-- Destroying the master key renders all derived CEKs irrecoverable
+`ThresholdManager` coordinates t-of-n Ed25519 attestations for writes (MPC shard
+storage, multi-sig). Pure Go; available under both backends.
 
 ## License
 
