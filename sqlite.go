@@ -4,8 +4,14 @@
 // under BOTH build configurations, exposing the same public API either way:
 //
 //   - CGO  (//go:build cgo)  → mattn/go-sqlite3 + SQLCipher: page-level
-//     AES-256 encryption at rest. This is the production engine. Build with
-//     CGO_ENABLED=1 -tags "sqlcipher sqlite_fts5".
+//     AES-256 encryption at rest. This is the production engine. Build with:
+//     CGO_ENABLED=1 \
+//     CGO_CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 -I<sqlcipher>/include/sqlcipher" \
+//     CGO_LDFLAGS="-lsqlcipher" \
+//     go build -tags "libsqlite3 sqlite_fts5"
+//     NOTE: the `sqlcipher` tag is INERT in mainline mattn (ships PLAINTEXT);
+//     the real recipe is the `libsqlite3` tag linked against libsqlcipher with
+//     the codec + URI flags above.
 //   - !CGO (//go:build !cgo) → modernc.org/sqlite (pure Go): NO encryption.
 //     Used only for CGO-off CI (test + lint) and local dev. Demanding a key
 //     on this backend is a hard error — it never silently stores plaintext.
@@ -22,10 +28,13 @@
 package sqlite
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 )
 
 // Mode determines the replication strategy.
@@ -119,6 +128,61 @@ type DB struct {
 // Encrypted reports whether this DB is backed by an at-rest-encrypted engine.
 func (db *DB) Encrypted() bool {
 	return db.config.RawKey != nil && EncryptionAvailable()
+}
+
+// CodecLinked reports whether at-rest encryption is ACTUALLY working in this
+// process — not merely advertised. EncryptionAvailable() is a backend-capability
+// flag (true for any CGO build), but a CGO build that forgot to link
+// libsqlcipher silently writes PLAINTEXT. CodecLinked proves the codec at
+// runtime: it opens a temp DB under a key, writes a marker, and checks the
+// on-disk bytes are real ciphertext (no plaintext "SQLite format 3" header,
+// marker absent).
+//
+// Use it to gate encryption assertions in tests: a properly-linked build runs
+// them; a CGO-without-codec build SKIPS instead of failing on plaintext (the
+// Dockerfile build, which links libsqlcipher, is where the hard ciphertext gate
+// runs). Returns false on the pure-Go backend.
+func CodecLinked() bool {
+	if !EncryptionAvailable() {
+		return false
+	}
+	dir, err := os.MkdirTemp("", "sqlite-codec-probe-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+
+	const marker = "codec-probe-marker-3f9c"
+	path := filepath.Join(dir, "probe.db")
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i*3 + 5)
+	}
+	db, err := Open(path, WithRawKey(key))
+	if err != nil {
+		return false
+	}
+	if _, err := db.Exec(`CREATE TABLE p (v TEXT)`); err != nil {
+		db.Close()
+		return false
+	}
+	if _, err := db.Exec(`INSERT INTO p (v) VALUES (?)`, marker); err != nil {
+		db.Close()
+		return false
+	}
+	db.Close()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	if bytes.HasPrefix(raw, []byte("SQLite format 3\x00")) {
+		return false // plaintext header => codec not linked
+	}
+	if bytes.Contains(raw, []byte(marker)) {
+		return false // marker visible => not encrypted
+	}
+	return true
 }
 
 // Open opens an encrypted, optionally distributed SQLite database.
