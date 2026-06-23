@@ -1,19 +1,49 @@
 # sqlite
 
-**Org:** hanzoai  ·  **Ecosystem:** hanzo  ·  **Path:** `/Users/a/work/hanzo/hanzoai/sqlite`
-**Origin:** https://github.com/hanzoai/sqlite.git
+**Org:** hanzoai · **Ecosystem:** hanzo · **Path:** `/Users/a/work/hanzo/hanzoai/sqlite`
+**Origin:** https://github.com/hanzoai/sqlite.git · **Module:** `github.com/hanzoai/sqlite`
 
-## Discovery
+Dual-backend `database/sql` driver. Registers the driver name **`sqlite`** under
+BOTH build configs with one public API:
 
-This file (`CLAUDE.md`) is the canonical agent-facing readme; `LLM.md` is a symlink to it. Update either name and both stay in sync.
+| Build | Backend | Encryption |
+|-------|---------|------------|
+| `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | mattn/go-sqlite3 → SQLCipher | AES-256 at rest |
+| `CGO_ENABLED=0` | modernc.org/sqlite (pure Go) | none (fail-secure: keyed Open errors) |
 
-## Where to look first
+## File map (decomplected by what actually varies)
 
-- `README.md` — human-facing overview (if present)
-- `package.json` / `Cargo.toml` / `pyproject.toml` / `go.mod` — language & deps
-- `.github/workflows/` — CI surface
-- `docs/` — extended docs (if present)
+- `sqlite.go` — tag-neutral: `Config`, `Option`, `WithKey/WithRawKey/WithPrincipalKey/…`, `DB`, `Open()`.
+- `cek.go` — tag-neutral, pure Go: `DeriveKey` (HKDF-SHA256 per-principal CEK), `PrincipalOrg/User`.
+- `threshold.go` — tag-neutral, pure Go: `ThresholdManager` (t-of-n Ed25519 write attestation).
+- `driver_cgo.go` (`//go:build cgo`) — registers `sqlite`→mattn; `EncryptionAvailable()=true`; `OpenDB`/`DSN` emit SQLCipher URI key.
+- `driver_nocgo.go` (`//go:build !cgo`) — blank-imports modernc (self-registers `sqlite`); `EncryptionAvailable()=false`; keyed open → `ErrEncryptionUnavailable`.
+- `encryption_proof_test.go` — anti-silent-plaintext gate (asserts real ciphertext + reopen + wrong-key rejection under cgo).
 
-## Sibling repos
+## CRITICAL — how SQLCipher actually works here (don't repeat the bug)
 
-See the org-level `LLM.md` at `/Users/a/work/hanzo/hanzoai/LLM.md` for the full inventory of sibling repos and inter-repo dependencies.
+mainline `mattn/go-sqlite3` has **NO `sqlcipher` build tag** and no `sqlite3_key`
+binding. `-tags sqlcipher` is **inert → ships PLAINTEXT**. It also **cannot reopen**
+a SQLCipher DB from a `ConnectHook` (mattn runs `PRAGMA busy_timeout/journal_mode/…`
+before the hook → "file is not a database"). Proven dead ends. The working path:
+
+```sh
+CGO_ENABLED=1 \
+CGO_CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 -I<sqlcipher>/include/sqlcipher" \
+CGO_LDFLAGS="-lsqlcipher" \
+go build -tags "libsqlite3 sqlite_fts5" ./...
+```
+
+The key rides the DSN as SQLCipher's **native URI param** `file:PATH?...&key=x'HEX'`,
+applied inside `sqlite3_open_v2` before any pragma → create AND reopen work.
+**Never log the DSN** (it contains the key). `TestEncryptionProof` fails a
+mis-linked build instead of shipping plaintext.
+
+## Consumers
+
+Hanzo IAM (`object/orgdb.go`) per-org encrypted DBs: `OpenDB(path, DeriveKey(mk,
+PrincipalOrg, slug))` → `xorm.NewEngineWithDB("sqlite", "", core.FromDB(db))`.
+
+## Versioning
+
+PATCH bumps only (v0.1.x). Current: v0.1.2.
