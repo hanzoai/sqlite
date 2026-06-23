@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Threshold write attestation for multi-party SQLite.
 //
 // Each party runs a node with a full replica. Write operations require
@@ -26,10 +28,10 @@ var (
 
 // WriteProposal is a proposed write that needs t-of-n attestations.
 type WriteProposal struct {
-	ID        [32]byte  // SHA-256 of the SQL + params
+	ID        [32]byte // SHA-256 of the SQL + params
 	SQL       string
 	Params    []any
-	Proposer  string    // node ID of proposer
+	Proposer  string // node ID of proposer
 	CreatedAt time.Time
 	ExpiresAt time.Time
 
