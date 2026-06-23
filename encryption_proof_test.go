@@ -47,7 +47,15 @@ func TestEncryptionProof(t *testing.T) {
 	// Dockerfile build, which links libsqlcipher. CI pins CGO_ENABLED=0 (the
 	// refuse branch above); a local `-tags libsqlite3` + libsqlcipher build runs
 	// the full ciphertext assertions below.
+	//
+	// EXCEPTION: when SQLITE_REQUIRE_CODEC=1 the skip becomes a HARD FAILURE. The
+	// Dockerfile sets it so the image's own test stage cannot go green on the
+	// inert-tag recipe (the V7 "CI-theater" footgun): a build that claims to ship
+	// encryption but didn't link the codec FAILS here instead of skipping.
 	if !CodecLinked() {
+		if os.Getenv("SQLITE_REQUIRE_CODEC") == "1" {
+			t.Fatal("SQLITE_REQUIRE_CODEC=1 but CodecLinked()=false: this build advertises encryption (cgo) yet did NOT link libsqlcipher — it would ship PLAINTEXT. Build with -tags \"libsqlite3 sqlite_fts5\" + CGO_CFLAGS=-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 + CGO_LDFLAGS=-lsqlcipher")
+		}
 		t.Skip("cgo build without libsqlcipher linked; encryption assertions skipped (Dockerfile build is the hard gate)")
 	}
 
@@ -128,13 +136,14 @@ func TestEnvelopeRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveKey A: %v", err)
 	}
-	blobA, err := WrapDEK(kekA, dek)
+	aad := PrincipalAAD(PrincipalOrg, "acme")
+	blobA, err := WrapDEK(kekA, dek, aad)
 	if err != nil {
 		t.Fatalf("WrapDEK A: %v", err)
 	}
 
-	// Unwrap under the same KEK yields the original DEK.
-	got, err := UnwrapDEK(kekA, blobA)
+	// Unwrap under the same KEK + aad yields the original DEK.
+	got, err := UnwrapDEK(kekA, blobA, aad)
 	if err != nil {
 		t.Fatalf("UnwrapDEK A: %v", err)
 	}
@@ -144,21 +153,32 @@ func TestEnvelopeRotation(t *testing.T) {
 
 	// A different KEK must NOT unwrap (GCM tag rejects it) — no partial key.
 	kekWrong, _ := DeriveKey(masterB, PrincipalOrg, "acme")
-	if _, err := UnwrapDEK(kekWrong, blobA); err == nil {
+	if _, err := UnwrapDEK(kekWrong, blobA, aad); err == nil {
 		t.Fatal("envelope: wrong KEK unwrapped the DEK — isolation broken")
 	}
 
-	// ROTATION: unwrap with old KEK, rewrap with new KEK. DEK unchanged.
-	mid, err := UnwrapDEK(kekA, blobA)
+	// V4 defense-in-depth: the SAME KEK but a DIFFERENT principal AAD must NOT
+	// unwrap — the blob is cryptographically bound to its principal, so a
+	// sidecar lifted onto another principal fails the GCM tag even if a KEK
+	// derivation ever collided.
+	if _, err := UnwrapDEK(kekA, blobA, PrincipalAAD(PrincipalOrg, "globex")); err == nil {
+		t.Fatal("envelope: blob unwrapped under a different principal AAD — principal binding broken")
+	}
+	if _, err := UnwrapDEK(kekA, blobA, PrincipalAAD(PrincipalGlobal, "acme")); err == nil {
+		t.Fatal("envelope: blob unwrapped under a different principal-type AAD — type binding broken")
+	}
+
+	// ROTATION: unwrap with old KEK, rewrap with new KEK (same aad). DEK unchanged.
+	mid, err := UnwrapDEK(kekA, blobA, aad)
 	if err != nil {
 		t.Fatalf("rotation unwrap: %v", err)
 	}
 	kekB, _ := DeriveKey(masterB, PrincipalOrg, "acme")
-	blobB, err := WrapDEK(kekB, mid)
+	blobB, err := WrapDEK(kekB, mid, aad)
 	if err != nil {
 		t.Fatalf("rewrap B: %v", err)
 	}
-	rotated, err := UnwrapDEK(kekB, blobB)
+	rotated, err := UnwrapDEK(kekB, blobB, aad)
 	if err != nil {
 		t.Fatalf("UnwrapDEK B: %v", err)
 	}
@@ -166,14 +186,14 @@ func TestEnvelopeRotation(t *testing.T) {
 		t.Fatal("rotation: DEK changed across rewrap — pages would be unreadable (BRICK)")
 	}
 	// Old blob must no longer unwrap under the new KEK.
-	if _, err := UnwrapDEK(kekB, blobA); err == nil {
+	if _, err := UnwrapDEK(kekB, blobA, aad); err == nil {
 		t.Fatal("rotation: old blob unwrapped under new KEK — rewrap is not binding")
 	}
 
 	// Tamper detection: flip a ciphertext byte, expect failure.
 	tampered := append([]byte(nil), blobB...)
 	tampered[len(tampered)-1] ^= 0x01
-	if _, err := UnwrapDEK(kekB, tampered); err == nil {
+	if _, err := UnwrapDEK(kekB, tampered, aad); err == nil {
 		t.Fatal("envelope: tampered blob unwrapped — GCM integrity not enforced")
 	}
 }
