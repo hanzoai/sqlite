@@ -123,6 +123,8 @@ func TestDeriveKeyEmptyPrincipal(t *testing.T) {
 }
 
 func TestWithPrincipalKeyRoundTrip(t *testing.T) {
+	skipWithoutSQLCipher(t)
+
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "roundtrip.db")
 	mk := masterKey(t)
