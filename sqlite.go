@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Package sqlite provides a distributed, encrypted SQLite driver for Hanzo.
 //
 // Built on go-sqlite3 with sqlcipher for page-level AES-256-CBC encryption.
@@ -35,14 +37,14 @@ type Config struct {
 	RawKey []byte // raw 256-bit key (skips KDF)
 
 	// Replication
-	Mode    Mode
-	NodeID  string
-	Listen  string   // bind address for replication
-	Peers   []string // peer addresses
+	Mode   Mode
+	NodeID string
+	Listen string   // bind address for replication
+	Peers  []string // peer addresses
 
 	// Threshold mode
-	Threshold  int              // t value (signatures required)
-	Parties    int              // n value (total parties)
+	Threshold  int                // t value (signatures required)
+	Parties    int                // n value (total parties)
 	SigningKey ed25519.PrivateKey // this node's signing key
 
 	// Internal: set by WithPrincipalKey if derivation fails.
