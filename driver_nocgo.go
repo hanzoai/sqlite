@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	// modernc.org/sqlite registers the "sqlite" database/sql driver in its own
@@ -20,8 +21,10 @@ import (
 )
 
 // ErrEncryptionUnavailable is returned when an encryption key is supplied to
-// this pure-Go backend, which cannot encrypt at rest.
-var ErrEncryptionUnavailable = errors.New("sqlite: encryption requested but this build has no SQLCipher backend (build with CGO_ENABLED=1 -tags sqlcipher)")
+// this pure-Go backend, which cannot encrypt at rest. The remediation must NOT
+// say `-tags sqlcipher` (that tag is inert in mainline mattn and ships
+// plaintext) — the real recipe is the libsqlite3 tag linked against libsqlcipher.
+var ErrEncryptionUnavailable = errors.New("sqlite: encryption requested but this build has no SQLCipher backend (build with CGO_ENABLED=1 -tags libsqlite3 linked against libsqlcipher)")
 
 // EncryptionAvailable reports that this build CANNOT encrypt at rest (always
 // false for the pure-Go backend).
@@ -70,6 +73,15 @@ func DSN(path string, rawKey []byte) string {
 		"_pragma=journal_mode(WAL)",
 		"_pragma=synchronous(NORMAL)",
 		"_pragma=foreign_keys(ON)",
+		"cache=shared",
 	}
-	return fmt.Sprintf("file:%s?%s", path, strings.Join(params, "&"))
+	// Escape the path so '?'/'#' in a path can't terminate it early and strip
+	// query params (parity with the cgo backend; defense in depth).
+	return fmt.Sprintf("file:%s?%s", escapeDBPath(path), strings.Join(params, "&"))
+}
+
+// escapeDBPath percent-encodes a filesystem path for safe embedding in a
+// `file:PATH?query` DSN, preserving '/' but escaping '?' and '#'.
+func escapeDBPath(path string) string {
+	return strings.ReplaceAll(url.PathEscape(path), "%2F", "/")
 }
