@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/hero.svg" alt="sqlite" width="880"></p>
+
 # Hanzo SQLite
 
 Dual-backend SQLite driver for the Hanzo ecosystem. Registers the
