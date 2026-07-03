@@ -1,4 +1,4 @@
-//go:build !cgo
+//go:build !cgo || sqlite_purego
 
 package sqlite
 

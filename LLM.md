@@ -9,15 +9,23 @@ BOTH build configs with one public API:
 | Build | Backend | Encryption |
 |-------|---------|------------|
 | `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | mattn/go-sqlite3 → SQLCipher | AES-256 at rest |
+| `CGO_ENABLED=1` + `-tags sqlite_purego` | modernc.org/sqlite (pure Go) | none (fail-secure: keyed Open errors) |
 | `CGO_ENABLED=0` | modernc.org/sqlite (pure Go) | none (fail-secure: keyed Open errors) |
+
+**`sqlite_purego` opt-out tag:** forces the pure-Go backend even under cgo. Default
+(no tag) is unchanged — cgo → SQLCipher — so encryption consumers are untouched.
+Use it when a binary links this fork AND another package that imports
+`modernc.org/sqlite` directly (base/commerce/o11y/orm/tasks): a plain cgo build
+would register `sqlite` twice (mattn here + modernc there) and panic at init;
+`-tags sqlite_purego` routes this fork to modernc too → one registration.
 
 ## File map (decomplected by what actually varies)
 
 - `sqlite.go` — tag-neutral: `Config`, `Option`, `WithKey/WithRawKey/WithPrincipalKey/…`, `DB`, `Open()`, `EncryptionAvailable()`, `CodecLinked()` (runtime codec probe).
 - `cek.go` — tag-neutral, pure Go: `DeriveKey` (HKDF-SHA256, length-prefixed injective info → KEK), `DeriveChildKey` (hierarchy), envelope `NewDEK`/`WrapDEK`/`UnwrapDEK` (AES-256-GCM; take a principal-binding `aad`), `PrincipalAAD` (the injective `(type,id)` encoding reused as the GCM AAD — DRY), `PrincipalGlobal/Org/User`.
 - `threshold.go` — tag-neutral, pure Go: `ThresholdManager` (t-of-n Ed25519 write attestation).
-- `driver_cgo.go` (`//go:build cgo`) — registers `sqlite`→mattn; `EncryptionAvailable()=true`; `OpenDB`/`DSN` emit SQLCipher URI key; path is percent-escaped so `?`/`#` can't strip `key=`.
-- `driver_nocgo.go` (`//go:build !cgo`) — blank-imports modernc (self-registers `sqlite`); `EncryptionAvailable()=false`; keyed open → `ErrEncryptionUnavailable`.
+- `driver_cgo.go` (`//go:build cgo && !sqlite_purego`) — registers `sqlite`→mattn; `EncryptionAvailable()=true`; `OpenDB`/`DSN` emit SQLCipher URI key; path is percent-escaped so `?`/`#` can't strip `key=`.
+- `driver_nocgo.go` (`//go:build !cgo || sqlite_purego`) — blank-imports modernc (self-registers `sqlite`); `EncryptionAvailable()=false`; keyed open → `ErrEncryptionUnavailable`. The `sqlite_purego` disjunct also selects this backend under cgo (see opt-out tag above).
 - `encryption_proof_test.go` — anti-silent-plaintext gate (real ciphertext + reopen + wrong-key rejection under cgo, SKIPs if codec unlinked) + envelope rotation/injectivity/hierarchy proofs (run under both tags).
 
 ## Envelope encryption — rotation-safe (read before touching key handling)
@@ -78,8 +86,13 @@ PrincipalOrg, slug))` → `xorm.NewEngineWithDB("sqlite", "", core.FromDB(db))`.
 
 ## Versioning
 
-PATCH bumps only (v0.1.x). Current: v0.1.4.
+PATCH bumps only (v0.1.x). Current: v0.1.5.
 
+- v0.1.5 — `sqlite_purego` opt-out build tag: `//go:build cgo && !sqlite_purego`
+  (mattn/SQLCipher, default) vs `//go:build !cgo || sqlite_purego` (modernc). Lets
+  a binary that also links a direct `modernc.org/sqlite` importer build under
+  CGO_ENABLED=1 without a double `sql.Register("sqlite")` panic. Default cgo
+  behavior unchanged (SQLCipher), so encryption consumers are untouched.
 - v0.1.4 — `WrapDEK`/`UnwrapDEK` take a principal-binding GCM `aad` + add
   `PrincipalAAD` (defense-in-depth). Dockerfile fixed to link the codec and
   self-assert via `SQLITE_REQUIRE_CODEC=1` (was inert-tag CI-theater).
