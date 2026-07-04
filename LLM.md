@@ -26,7 +26,10 @@ would register `sqlite` twice (mattn here + modernc there) and panic at init;
 - `threshold.go` — tag-neutral, pure Go: `ThresholdManager` (t-of-n Ed25519 write attestation).
 - `driver_cgo.go` (`//go:build cgo && !sqlite_purego`) — registers `sqlite`→mattn; `EncryptionAvailable()=true`; `OpenDB`/`DSN` emit SQLCipher URI key; path is percent-escaped so `?`/`#` can't strip `key=`.
 - `driver_nocgo.go` (`//go:build !cgo || sqlite_purego`) — blank-imports modernc (self-registers `sqlite`); `EncryptionAvailable()=false`; keyed open → `ErrEncryptionUnavailable`. The `sqlite_purego` disjunct also selects this backend under cgo (see opt-out tag above).
+- `hooks.go` — tag-neutral: `CommitHookFn` (`func() int32`), `HookRegisterer`. The ONE commit-hook API; `hooks_{cgo,nocgo}.go` (same `cgo && !sqlite_purego` / `!cgo || sqlite_purego` split as the drivers) supply `CommitHookRegisterer(driverConn any) (HookRegisterer, bool)` — mattn's native `func() int` / modernc's `func() int32` bridged to `CommitHookFn`. Consumers import ONLY this pkg (Base's WAL/PITR replication uses it via `(*sql.Conn).Raw`).
+- `pragma.go` — tag-neutral: `Pragma{Name,Value}`, `DefaultPragmas` (canonical embedded tuning: busy_timeout→WAL→…). `pragma_{cgo,nocgo}.go` supply `PragmaDSN(path, pragmas)` — mattn `_name=value` / modernc `_pragma=name(value)`. One pragma set, correct on the active backend; a single-form DSN is silently dropped by the other backend.
 - `encryption_proof_test.go` — anti-silent-plaintext gate (real ciphertext + reopen + wrong-key rejection under cgo, SKIPs if codec unlinked) + envelope rotation/injectivity/hierarchy proofs (run under both tags).
+- `hooks_test.go` / `pragma_test.go` — prove (under BOTH tags) the commit hook fires + aborts + clears, and that `PragmaDSN` pragmas actually take effect (journal_mode=WAL, busy_timeout=10000, foreign_keys=ON).
 
 ## Envelope encryption — rotation-safe (read before touching key handling)
 
@@ -86,8 +89,20 @@ PrincipalOrg, slug))` → `xorm.NewEngineWithDB("sqlite", "", core.FromDB(db))`.
 
 ## Versioning
 
-PATCH bumps only (v0.1.x). Current: v0.1.5.
+PATCH bumps only (v0.x.y). Current: v0.2.1.
 
+- v0.2.1 — Unified commit-hook + pragma-DSN surface (`hooks*.go`, `pragma*.go`)
+  so consumers import ONLY `hanzoai/sqlite` and drop every direct
+  `modernc.org/sqlite` import. `CommitHookRegisterer` bridges mattn `func() int`
+  / modernc `func() int32` to one `CommitHookFn`; `PragmaDSN`/`DefaultPragmas`
+  encode one pragma set in the active backend's DSN syntax. First consumer:
+  hanzoai/base (v1.5.5) routes `core.DefaultDBConnect`, the multitenant `store`,
+  and its WAL/PITR commit hook onto this — zero direct modernc imports remain, so
+  a cgo consumer that needs SQLCipher (commerce's per-tenant money DBs) no longer
+  double-registers "sqlite". Complements the v0.1.5 `sqlite_purego` opt-out (which
+  serves the OTHER case: a pure-Go cgo consumer that wants neither SQLCipher nor
+  to drop modernc). The four backend-split files share the drivers' exact build
+  constraints, so all four tag/cgo combos stay mutually exclusive + exhaustive.
 - v0.1.5 — `sqlite_purego` opt-out build tag: `//go:build cgo && !sqlite_purego`
   (mattn/SQLCipher, default) vs `//go:build !cgo || sqlite_purego` (modernc). Lets
   a binary that also links a direct `modernc.org/sqlite` importer build under
