@@ -89,8 +89,26 @@ PrincipalOrg, slug))` → `xorm.NewEngineWithDB("sqlite", "", core.FromDB(db))`.
 
 ## Versioning
 
-PATCH bumps only (v0.x.y). Current: v0.2.2.
+PATCH bumps only (v0.x.y). Current: v0.2.3.
 
+- v0.2.3 — Two backend-neutral primitives that let hanzoai/replicate drop its
+  direct modernc import (the last second `sql.Register("sqlite")` in the cgo
+  cloud binary — base→commerce→cloud all embed replicate, so this was a live
+  `Register called twice` panic under CGO=1):
+  - `SetPersistWAL(rawConn any, on bool) error` (`filecontrol_{cgo,nocgo}.go`):
+    sets SQLITE_FCNTL_PERSIST_WAL on a raw driver conn (from (*sql.Conn).Raw) —
+    mattn `SetFileControlInt("main", SQLITE_FCNTL_PERSIST_WAL, …)` under cgo,
+    modernc's exported `FileControl.FileControlPersistWAL` otherwise. Keeps the
+    -wal file across the last close, which WAL-shipping replication requires.
+  - `OpenPragma(dsn string, pragmas []Pragma) (*sql.DB, error)` (`connector.go`):
+    a database/sql Connector that applies pragmas to EVERY pooled connection via
+    PRAGMA at connect time. The load-bearing case is wal_autocheckpoint: modernc
+    honors `?_pragma=wal_autocheckpoint(0)` in the DSN, but mattn silently DROPS
+    it, so a CGO=1 binary would re-enable auto-checkpoint and truncate the WAL
+    under a replicator — losing committed frames. Running it per-connection via
+    ExecContext is backend-neutral. Proven on 3 concurrent conns under both
+    backends. Tag-neutral (resolves the registered "sqlite" driver via a
+    throwaway :memory: DB).
 - v0.2.2 — Two additions that let the remaining direct-modernc consumers drop
   their backend import, plus the luxfi-crypto AEAD swap:
   - `IsConstraintUnique` / `IsConstraintPrimaryKey` / `IsConstraintForeignKey`
