@@ -89,8 +89,27 @@ PrincipalOrg, slug))` → `xorm.NewEngineWithDB("sqlite", "", core.FromDB(db))`.
 
 ## Versioning
 
-PATCH bumps only (v0.x.y). Current: v0.2.1.
+PATCH bumps only (v0.x.y). Current: v0.2.2.
 
+- v0.2.2 — Two additions that let the remaining direct-modernc consumers drop
+  their backend import, plus the luxfi-crypto AEAD swap:
+  - `IsConstraintUnique` / `IsConstraintPrimaryKey` / `IsConstraintForeignKey`
+    (`errcodes.go` + backend-split `errcodes_{cgo,nocgo}.go`): backend-neutral
+    classification of SQLite constraint violations. The three predicates live
+    once (tag-neutral); only the error unwrap (mattn `sqlite3.Error` value /
+    modernc `*sqlite.Error` pointer) and the reference constants vary by tag —
+    same `cgo && !sqlite_purego` / `!cgo || sqlite_purego` scheme as the driver.
+    First consumer: o11y's `sqlitesqlstore`, which drops
+    `err.(*modernc.Error).Code() == lib.SQLITE_CONSTRAINT_*`.
+  - `cek.go` AES-256-GCM DEK wrap/unwrap moved from stdlib crypto/aes+cipher to
+    `github.com/luxfi/crypto/aead.NewAES256GCM` (luxfi wraps crypto/aes +
+    cipher.NewGCM → standard NIST AES-256-GCM, byte-identical: 12-byte nonce,
+    16-byte tag, 61-byte sidecar unchanged, DEK never regenerated). The KEK
+    stays on `x/crypto/hkdf` (RFC-5869) — luxfi/crypto/kdf is a QZMQ KeySchedule
+    with hard-coded labels, NOT generic HKDF, so repointing it would rederive
+    every KEK and brick all encrypted stores. Regression gate: `cek_golden_test.go`
+    pins a FROZEN pre-swap sidecar fixture and asserts post-swap UnwrapDEK
+    decrypts it to the exact DEK, green under all backends. luxfi/crypto v1.19.26.
 - v0.2.1 — Unified commit-hook + pragma-DSN surface (`hooks*.go`, `pragma*.go`)
   so consumers import ONLY `hanzoai/sqlite` and drop every direct
   `modernc.org/sqlite` import. `CommitHookRegisterer` bridges mattn `func() int`
