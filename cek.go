@@ -27,14 +27,13 @@
 package sqlite
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
 
+	"github.com/luxfi/crypto/aead"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -217,14 +216,16 @@ func wrapAAD(aad []byte) []byte {
 	return out
 }
 
-func newGCM(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
+// newGCM builds the AES-256-GCM AEAD used to wrap/unwrap DEKs, backed by
+// luxfi/crypto/aead (pure-Go: it wraps crypto/aes + crypto/cipher.NewGCM, so
+// the output is standard NIST AES-256-GCM — 12-byte nonce, 16-byte tag —
+// byte-identical to the prior stdlib construction. Existing 61-byte `.dek`
+// sidecars therefore keep decrypting unchanged; the golden-vector KAT in
+// cek_golden_test.go is the regression gate on that equivalence.)
+func newGCM(key []byte) (aead.AEAD, error) {
+	gcm, err := aead.NewAES256GCM(key)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite/cek: aes cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite/cek: gcm: %w", err)
+		return nil, fmt.Errorf("sqlite/cek: aes-256-gcm: %w", err)
 	}
 	return gcm, nil
 }
