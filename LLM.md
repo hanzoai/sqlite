@@ -89,8 +89,39 @@ PrincipalOrg, slug))` → `xorm.NewEngineWithDB("sqlite", "", core.FromDB(db))`.
 
 ## Versioning
 
-PATCH bumps only (v0.x.y). Current: v0.2.3.
+PATCH bumps only (v0.x.y). Current: v0.2.4.
 
+- v0.2.4 — The envelope-aware OPEN + generic self-healing MIGRATION, so a consumer
+  gets at-rest encryption through ONE call instead of each store reimplementing
+  (and diverging on) the DEK/sidecar/migration dance. This is what lets the unified
+  cloud binary encrypt its ~26 plaintext subsystem DBs (crm/audit/treasury/wallets/
+  …) by swapping `sql.Open("sqlite", path)` → `sqlite.OpenEnveloped(path, masterKey,
+  PrincipalGlobal, name)` — no per-subsystem envelope code.
+  - `OpenEnveloped(path, masterKey, pt, id) (*sql.DB, error)` (`enveloped.go`): nil
+    masterKey → plaintext `sql.Open` (byte-identical to the bare call, so existing
+    callers are untouched when encryption is off). masterKey set (32B) → resolves
+    the four file states: sidecar present → unwrap DEK + open SQLCipher; absent/empty
+    → mint DEK + O_EXCL sidecar + create encrypted (first-touch race safe); PLAINTEXT
+    file → SELF-HEAL via MigrateFileToEncrypted then open; already-ciphertext-without
+    -sidecar → REFUSE (DEK unrecoverable). Fail-secure: key set on a build that can't
+    encrypt (pure-Go, or cgo w/o codec) errors, never opens plaintext.
+  - `MigrateFileToEncrypted(path, masterKey, pt, id) (rows, changed, err)`
+    (`migrate.go`): the generic form of IAM's `sqlite2enveloped` / commerce's
+    `EncryptDataDir`, lifted into the envelope's own package (DRY). Idempotent
+    (sidecar present → no-op). WAL-safe (opens R/W, verified TRUNCATE checkpoint,
+    fails on a busy/live writer). Replays arbitrary schema (tables then indexes,
+    carries user_version), NULL-preserving row copy, per-table row-hash PARITY gate
+    BEFORE an atomic cutover that keeps `<db>.plaintext.bak` — source untouched on
+    any error, so a botched rekey cannot lose a row. Destination created via the
+    SAME OpenDB path the runtime opens with (guaranteed reopen-able). Fail-closed on
+    a non-plaintext file (won't clobber lost-sidecar ciphertext) and on a build
+    without the codec.
+  - Proven: `enveloped_test.go` (round-trip incl. NULL/blob fidelity + user_version,
+    idempotency, fresh-create-encrypted, self-heal, refuse-cipher-without-sidecar,
+    wrong-master-key-fails) green under CGO+SQLCipher; plaintext-passthrough green
+    under all three backends. Independently pre-proven against a COPY of all 47 real
+    prod cloud DBs (audit 40,857 rows, wallets, crm, treasury, …) under the real
+    master key: 47/47 ciphertext-at-rest + exact per-table row-count parity, 0 fail.
 - v0.2.3 — Two backend-neutral primitives that let hanzoai/replicate drop its
   direct modernc import (the last second `sql.Register("sqlite")` in the cgo
   cloud binary — base→commerce→cloud all embed replicate, so this was a live
