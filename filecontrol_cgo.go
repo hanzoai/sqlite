@@ -5,7 +5,7 @@ package sqlite
 import (
 	"fmt"
 
-	sqlite3 "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/hanzoai/csqlite"
 )
 
 // SetPersistWAL sets SQLite's SQLITE_FCNTL_PERSIST_WAL file control on rawConn —
@@ -15,11 +15,11 @@ import (
 // crash mid-sync doesn't lose committed frames.
 //
 // It is the one backend-neutral way to set PERSIST_WAL; consumers never touch
-// the mattn/modernc conn type directly. Returns an error if rawConn is not this
-// build's SQLite connection type.
+// the csqlite/modernc conn type directly. Returns an error if rawConn is not
+// this build's SQLite connection type.
 //
-// CGO backend: mattn/go-sqlite3 exposes SetFileControlInt; the op constant is
-// mattn's own SQLITE_FCNTL_PERSIST_WAL (= 10).
+// CGO backend: csqlite exposes SetFileControlInt; the op constant is csqlite's
+// own SQLITE_FCNTL_PERSIST_WAL (= 10).
 func SetPersistWAL(rawConn any, on bool) error {
 	c, ok := rawConn.(*sqlite3.SQLiteConn)
 	if !ok {

@@ -8,15 +8,22 @@ BOTH build configs with one public API:
 
 | Build | Backend | Encryption |
 |-------|---------|------------|
-| `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | mattn/go-sqlite3 → SQLCipher | AES-256 at rest |
+| `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | hanzoai/csqlite → SQLCipher | AES-256 at rest |
 | `CGO_ENABLED=1` + `-tags sqlite_purego` | modernc.org/sqlite (pure Go) | none (fail-secure: keyed Open errors) |
 | `CGO_ENABLED=0` | modernc.org/sqlite (pure Go) | none (fail-secure: keyed Open errors) |
+
+The cgo backend is **`github.com/hanzoai/csqlite`** — the forked go-sqlite3 cgo
+bindings, vendored so NOTHING is imported from `mattn/go-sqlite3` (it is absent
+from go.mod/go.sum/dep graph). csqlite carries the SQLite amalgamation + cgo
+driver and registers the `sqlite3` driver name; this wrapper registers `sqlite`
+over the same `*csqlite.SQLiteDriver`. The `!cgo` path stays on
+`modernc.org/sqlite` (a different, pure-Go engine — not go-sqlite3).
 
 **`sqlite_purego` opt-out tag:** forces the pure-Go backend even under cgo. Default
 (no tag) is unchanged — cgo → SQLCipher — so encryption consumers are untouched.
 Use it when a binary links this fork AND another package that imports
 `modernc.org/sqlite` directly (base/commerce/o11y/orm/tasks): a plain cgo build
-would register `sqlite` twice (mattn here + modernc there) and panic at init;
+would register `sqlite` twice (csqlite here + modernc there) and panic at init;
 `-tags sqlite_purego` routes this fork to modernc too → one registration.
 
 ## File map (decomplected by what actually varies)
@@ -24,10 +31,10 @@ would register `sqlite` twice (mattn here + modernc there) and panic at init;
 - `sqlite.go` — tag-neutral: `Config`, `Option`, `WithKey/WithRawKey/WithPrincipalKey/…`, `DB`, `Open()`, `EncryptionAvailable()`, `CodecLinked()` (runtime codec probe).
 - `cek.go` — tag-neutral, pure Go: `DeriveKey` (HKDF-SHA256, length-prefixed injective info → KEK), `DeriveChildKey` (hierarchy), envelope `NewDEK`/`WrapDEK`/`UnwrapDEK` (AES-256-GCM; take a principal-binding `aad`), `PrincipalAAD` (the injective `(type,id)` encoding reused as the GCM AAD — DRY), `PrincipalGlobal/Org/User`.
 - `threshold.go` — tag-neutral, pure Go: `ThresholdManager` (t-of-n Ed25519 write attestation).
-- `driver_cgo.go` (`//go:build cgo && !sqlite_purego`) — registers `sqlite`→mattn; `EncryptionAvailable()=true`; `OpenDB`/`DSN` emit SQLCipher URI key; path is percent-escaped so `?`/`#` can't strip `key=`.
+- `driver_cgo.go` (`//go:build cgo && !sqlite_purego`) — registers `sqlite`→csqlite; `EncryptionAvailable()=true`; `OpenDB`/`DSN` emit SQLCipher URI key; path is percent-escaped so `?`/`#` can't strip `key=`.
 - `driver_nocgo.go` (`//go:build !cgo || sqlite_purego`) — blank-imports modernc (self-registers `sqlite`); `EncryptionAvailable()=false`; keyed open → `ErrEncryptionUnavailable`. The `sqlite_purego` disjunct also selects this backend under cgo (see opt-out tag above).
-- `hooks.go` — tag-neutral: `CommitHookFn` (`func() int32`), `HookRegisterer`. The ONE commit-hook API; `hooks_{cgo,nocgo}.go` (same `cgo && !sqlite_purego` / `!cgo || sqlite_purego` split as the drivers) supply `CommitHookRegisterer(driverConn any) (HookRegisterer, bool)` — mattn's native `func() int` / modernc's `func() int32` bridged to `CommitHookFn`. Consumers import ONLY this pkg (Base's WAL/PITR replication uses it via `(*sql.Conn).Raw`).
-- `pragma.go` — tag-neutral: `Pragma{Name,Value}`, `DefaultPragmas` (canonical embedded tuning: busy_timeout→WAL→…). `pragma_{cgo,nocgo}.go` supply `PragmaDSN(path, pragmas)` — mattn `_name=value` / modernc `_pragma=name(value)`. One pragma set, correct on the active backend; a single-form DSN is silently dropped by the other backend.
+- `hooks.go` — tag-neutral: `CommitHookFn` (`func() int32`), `HookRegisterer`. The ONE commit-hook API; `hooks_{cgo,nocgo}.go` (same `cgo && !sqlite_purego` / `!cgo || sqlite_purego` split as the drivers) supply `CommitHookRegisterer(driverConn any) (HookRegisterer, bool)` — csqlite's native `func() int` / modernc's `func() int32` bridged to `CommitHookFn`. Consumers import ONLY this pkg (Base's WAL/PITR replication uses it via `(*sql.Conn).Raw`).
+- `pragma.go` — tag-neutral: `Pragma{Name,Value}`, `DefaultPragmas` (canonical embedded tuning: busy_timeout→WAL→…). `pragma_{cgo,nocgo}.go` supply `PragmaDSN(path, pragmas)` — csqlite `_name=value` / modernc `_pragma=name(value)`. One pragma set, correct on the active backend; a single-form DSN is silently dropped by the other backend.
 - `encryption_proof_test.go` — anti-silent-plaintext gate (real ciphertext + reopen + wrong-key rejection under cgo, SKIPs if codec unlinked) + envelope rotation/injectivity/hierarchy proofs (run under both tags).
 - `hooks_test.go` / `pragma_test.go` — prove (under BOTH tags) the commit hook fires + aborts + clears, and that `PragmaDSN` pragmas actually take effect (journal_mode=WAL, busy_timeout=10000, foreign_keys=ON).
 
@@ -56,10 +63,11 @@ encrypted files.
 
 ## CRITICAL — how SQLCipher actually works here (don't repeat the bug)
 
-mainline `mattn/go-sqlite3` has **NO `sqlcipher` build tag** and no `sqlite3_key`
-binding. `-tags sqlcipher` is **inert → ships PLAINTEXT**. It also **cannot reopen**
-a SQLCipher DB from a `ConnectHook` (mattn runs `PRAGMA busy_timeout/journal_mode/…`
-before the hook → "file is not a database"). Proven dead ends. The working path:
+the go-sqlite3 cgo bindings (now `hanzoai/csqlite`, forked verbatim) have **NO
+`sqlcipher` build tag** and no `sqlite3_key` binding. `-tags sqlcipher` is
+**inert → ships PLAINTEXT**. It also **cannot reopen** a SQLCipher DB from a
+`ConnectHook` (csqlite runs `PRAGMA busy_timeout/journal_mode/…` before the hook
+→ "file is not a database"). Proven dead ends. The working path:
 
 ```sh
 CGO_ENABLED=1 \
@@ -89,8 +97,25 @@ PrincipalOrg, slug))` → `xorm.NewEngineWithDB("sqlite", "", core.FromDB(db))`.
 
 ## Versioning
 
-PATCH bumps only (v0.x.y). Current: v0.2.3.
+Current: **v0.3.0**. v0.3.0 is the first MINOR bump — it changes the cgo backend
+module (mattn → hanzoai/csqlite), a dependency-graph change, so not a patch.
 
+- v0.3.0 — **Zero `mattn/go-sqlite3`.** The cgo backend is now
+  `github.com/hanzoai/csqlite` (v0.1.0) — the go-sqlite3 cgo bindings forked
+  verbatim into a Hanzo repo (SQLite amalgamation + cgo driver + callback
+  trampolines, rebranded `package csqlite`, MIT preserved). `driver_cgo.go`,
+  `hooks_cgo.go`, `errcodes_cgo.go`, `filecontrol_cgo.go` import
+  `sqlite3 "github.com/hanzoai/csqlite"` (alias kept, so the wrapper code is
+  otherwise unchanged). go.mod drops `require mattn/go-sqlite3`, adds
+  `require hanzoai/csqlite`; `mattn/go-sqlite3` is absent from go.mod/go.sum and
+  every dep graph (cgo, `!cgo`, `libsqlite3`). This lets consumers
+  (cloud/o11y/ai/base/commerce) delete the
+  `replace mattn/go-sqlite3 v2.0.3+incompatible => v1.14.47` redirect. SQLCipher
+  is unchanged (same `-tags libsqlite3` + libsqlcipher recipe, same URI key);
+  proven green: `SQLITE_REQUIRE_CODEC=1 TestEncryptionProof` PASSES through the
+  fork, `cek_golden` fixture still decrypts, all three build configs green. The
+  `!cgo` path stays on `modernc.org/sqlite` (a distinct pure-Go engine, not
+  go-sqlite3, so out of scope for the mattn rip).
 - v0.2.3 — Two backend-neutral primitives that let hanzoai/replicate drop its
   direct modernc import (the last second `sql.Register("sqlite")` in the cgo
   cloud binary — base→commerce→cloud all embed replicate, so this was a live

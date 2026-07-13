@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	sqlite3 "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/hanzoai/csqlite"
 )
 
 // ErrEncryptionUnavailable is returned when an encryption key is supplied to a
@@ -18,8 +18,9 @@ var ErrEncryptionUnavailable = errors.New("sqlite: encryption requested but this
 
 // init registers the "sqlite" database/sql driver name — the same name
 // modernc.org/sqlite registers under the !cgo backend — backed here by
-// go-sqlite3 (CGO) linked against libsqlcipher. go-sqlite3 also registers
-// "sqlite3" in its own init, so both names resolve to the same engine.
+// hanzoai/csqlite (the forked go-sqlite3 cgo bindings) linked against
+// libsqlcipher. csqlite also registers "sqlite3" in its own init, so both names
+// resolve to the same engine.
 //
 // HOW ENCRYPTION WORKS (read before changing anything):
 //
@@ -30,15 +31,16 @@ var ErrEncryptionUnavailable = errors.New("sqlite: encryption requested but this
 //	CGO_CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 -I<sqlcipher>/include/sqlcipher"
 //	CGO_LDFLAGS="-L<sqlcipher>/lib -lsqlcipher"
 //
-// mainline mattn/go-sqlite3 has NO `sqlcipher` build tag and no sqlite3_key()
-// binding. It also CANNOT key a database from a ConnectHook: Open() runs a
-// battery of PRAGMAs (busy_timeout, journal_mode, foreign_keys, ...) via
-// sqlite3_exec BEFORE the ConnectHook fires, which touches the header of an
-// existing encrypted file and fails with "file is not a database" on reopen.
+// the go-sqlite3 cgo bindings (csqlite) have NO `sqlcipher` build tag and no
+// sqlite3_key() binding. They also CANNOT key a database from a ConnectHook:
+// Open() runs a battery of PRAGMAs (busy_timeout, journal_mode, foreign_keys,
+// ...) via sqlite3_exec BEFORE the ConnectHook fires, which touches the header
+// of an existing encrypted file and fails with "file is not a database" on
+// reopen.
 //
 // The working mechanism is SQLCipher's NATIVE URI key parameter: with
 // SQLITE_USE_URI=1, a `file:PATH?...&key=x'HEX'` DSN is keyed by SQLCipher's VFS
-// at sqlite3_open_v2 time — before mattn runs any pragma — so both create AND
+// at sqlite3_open_v2 time — before csqlite runs any pragma — so both create AND
 // reopen succeed. The key therefore rides the DSN (see DSN below). Callers MUST
 // keep that DSN out of logs (IAM sets showSql=false and never logs the DSN).
 func init() {
@@ -63,7 +65,7 @@ func OpenDB(path string, rawKey []byte) (*sql.DB, error) {
 	return openDB(path, &Config{RawKey: rawKey})
 }
 
-// openDB opens the database on the mattn/SQLCipher backend using the SQLCipher
+// openDB opens the database on the csqlite/SQLCipher backend using the SQLCipher
 // URI key parameter (keyed at open time, reopen-safe).
 func openDB(path string, cfg *Config) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", DSN(path, cfg.RawKey))
@@ -73,7 +75,7 @@ func openDB(path string, cfg *Config) (*sql.DB, error) {
 	return db, nil
 }
 
-// DSN builds a canonical IAM SQLite DSN for the active (CGO/mattn/SQLCipher)
+// DSN builds a canonical IAM SQLite DSN for the active (CGO/csqlite/SQLCipher)
 // backend.
 //
 // When rawKey is non-nil it is emitted as SQLCipher's native `key=x'HEX'` URI

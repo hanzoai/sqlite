@@ -3,16 +3,17 @@
 // It is dual-backend and registers the database/sql driver name "sqlite"
 // under BOTH build configurations, exposing the same public API either way:
 //
-//   - CGO  (//go:build cgo && !sqlite_purego) → mattn/go-sqlite3 + SQLCipher:
+//   - CGO  (//go:build cgo && !sqlite_purego) → hanzoai/csqlite + SQLCipher:
 //     page-level AES-256 encryption at rest. This is the production engine.
-//     Build with:
+//     csqlite is the forked go-sqlite3 cgo bindings, vendored so nothing is
+//     imported from mattn. Build with:
 //     CGO_ENABLED=1 \
 //     CGO_CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 -I<sqlcipher>/include/sqlcipher" \
 //     CGO_LDFLAGS="-lsqlcipher" \
 //     go build -tags "libsqlite3 sqlite_fts5"
-//     NOTE: the `sqlcipher` tag is INERT in mainline mattn (ships PLAINTEXT);
-//     the real recipe is the `libsqlite3` tag linked against libsqlcipher with
-//     the codec + URI flags above.
+//     NOTE: the `sqlcipher` tag is INERT in the go-sqlite3 lineage (ships
+//     PLAINTEXT); the real recipe is the `libsqlite3` tag linked against
+//     libsqlcipher with the codec + URI flags above.
 //   - !CGO (//go:build !cgo || sqlite_purego) → modernc.org/sqlite (pure Go):
 //     NO encryption. Used for CGO-off CI (test + lint) and local dev. Demanding
 //     a key on this backend is a hard error — it never silently stores plaintext.
@@ -23,8 +24,8 @@
 // exists for one reason: a binary that links this fork AND another package that
 // imports modernc.org/sqlite directly (e.g. a service embedding hanzoai/base,
 // commerce, o11y, orm or tasks) would, under a plain CGO_ENABLED=1 build,
-// register the database/sql "sqlite" driver TWICE — once here via mattn, once by
-// modernc — and panic at init ("sql: Register called twice for driver sqlite").
+// register the database/sql "sqlite" driver TWICE — once here via csqlite, once
+// by modernc — and panic at init ("sql: Register called twice for driver sqlite").
 // Such a service that needs neither SQLCipher nor a C toolchain builds with
 // `-tags sqlite_purego`: this fork then routes to modernc too, so the whole
 // binary registers "sqlite" exactly once. (CGO_ENABLED=0 achieves the same and
