@@ -22,8 +22,6 @@ import (
 	"github.com/hanzoai/sqlite/internal/engine/vfs"
 )
 
-const driverName = "sqlite"
-
 // ErrEncryptionUnavailable is retained for API symmetry with the CGO backend. It
 // is never returned now: the pure-Go backend encrypts via the vendored engine +
 // the hanzoai/sqlcipher codec VFS, so encryption is always available.
