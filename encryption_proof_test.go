@@ -9,17 +9,17 @@ import (
 
 // TestEncryptionProof is the anti-silent-plaintext gate.
 //
-// On the !cgo (pure-Go) backend, encryption is unavailable: Open with a key MUST
-// return ErrEncryptionUnavailable and never write a file.
+// Both backends encrypt at rest now: the pure-Go (!cgo) backend through the
+// vendored engine + the hanzoai/sqlcipher codec VFS, the cgo backend through
+// libsqlcipher. EncryptionAvailable() is therefore true under both tags.
 //
-// On the cgo backend, EncryptionAvailable() reports true — but that is only a
-// backend-capability flag. A cgo build that forgot to link libsqlcipher (e.g. a
-// regression back to the inert `-tags sqlcipher`) links plain sqlite and silently
-// writes PLAINTEXT. This test forces the issue: under cgo it writes a known
-// marker under a key and asserts the on-disk bytes are real ciphertext (no
-// "SQLite format 3" header, marker absent) AND that the data survives a reopen
-// with the same key. A mis-linked production build therefore FAILS CI instead of
-// shipping a plaintext database.
+// The one remaining silent-plaintext risk is a cgo build that forgot to LINK
+// libsqlcipher (a regression to the inert `-tags sqlcipher`): it links plain
+// sqlite and no-ops the key. CodecLinked() proves the codec at runtime and is
+// always true on the pure-Go backend (nothing to mis-link) and on a correctly
+// linked cgo build. This test writes a known marker under a key and asserts the
+// on-disk bytes are real ciphertext (no "SQLite format 3" header, marker absent)
+// AND that the data survives a reopen with the same key.
 func TestEncryptionProof(t *testing.T) {
 	const marker = "anti-plaintext-canary-7f3a"
 	key := make([]byte, 32)
@@ -31,32 +31,21 @@ func TestEncryptionProof(t *testing.T) {
 	dbPath := filepath.Join(dir, "proof.db")
 
 	if !EncryptionAvailable() {
-		// Pure-Go backend: a keyed Open must be refused, with no file created.
-		if _, err := Open(dbPath, WithRawKey(key)); err != ErrEncryptionUnavailable {
-			t.Fatalf("!cgo Open with key: got err=%v, want ErrEncryptionUnavailable", err)
-		}
-		if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
-			t.Fatalf("!cgo backend created a file for a refused encrypted open: %v", statErr)
-		}
-		return
+		t.Fatal("EncryptionAvailable() is false: every build encrypts now")
 	}
 
-	// CGO build advertised as encryption-capable, but the codec may not be
-	// linked (a CGO build without libsqlcipher silently writes plaintext). SKIP
-	// rather than fail in that case — the hard ciphertext gate runs in the
-	// Dockerfile build, which links libsqlcipher. CI pins CGO_ENABLED=0 (the
-	// refuse branch above); a local `-tags libsqlite3` + libsqlcipher build runs
-	// the full ciphertext assertions below.
+	// A cgo build without libsqlcipher linked silently writes plaintext. SKIP the
+	// ciphertext assertions in that one case — the Dockerfile build links
+	// libsqlcipher and is the hard gate. The pure-Go backend and a correctly
+	// linked cgo build both report CodecLinked()=true and run the full proof.
 	//
-	// EXCEPTION: when SQLITE_REQUIRE_CODEC=1 the skip becomes a HARD FAILURE. The
-	// Dockerfile sets it so the image's own test stage cannot go green on the
-	// inert-tag recipe (the V7 "CI-theater" footgun): a build that claims to ship
-	// encryption but didn't link the codec FAILS here instead of skipping.
+	// EXCEPTION: SQLITE_REQUIRE_CODEC=1 turns the skip into a HARD FAILURE, so an
+	// image that claims encryption but didn't link the codec fails here.
 	if !CodecLinked() {
 		if os.Getenv("SQLITE_REQUIRE_CODEC") == "1" {
-			t.Fatal("SQLITE_REQUIRE_CODEC=1 but CodecLinked()=false: this build advertises encryption (cgo) yet did NOT link libsqlcipher — it would ship PLAINTEXT. Build with -tags \"libsqlite3 sqlite_fts5\" + CGO_CFLAGS=-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 + CGO_LDFLAGS=-lsqlcipher")
+			t.Fatal("SQLITE_REQUIRE_CODEC=1 but CodecLinked()=false: this cgo build advertises encryption yet did NOT link libsqlcipher — it would ship PLAINTEXT. Build with -tags \"libsqlite3 sqlite_fts5\" + CGO_CFLAGS=-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 + CGO_LDFLAGS=-lsqlcipher, or build CGO_ENABLED=0 for the pure-Go codec")
 		}
-		t.Skip("cgo build without libsqlcipher linked; encryption assertions skipped (Dockerfile build is the hard gate)")
+		t.Skip("cgo build without libsqlcipher linked; encryption assertions skipped (pure-Go build and the Dockerfile build are the hard gates)")
 	}
 
 	// cgo backend with codec linked: prove the bytes on disk are ciphertext.
