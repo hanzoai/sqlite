@@ -4,35 +4,33 @@
 
 Dual-backend SQLite driver for the Hanzo ecosystem. Registers the
 `database/sql` driver name **`sqlite`** under both build configurations and
-exposes the same API either way:
+exposes the same API either way. **Both backends encrypt at rest, in the same
+SQLCipher-4 format** — a database written by one opens under the other.
 
 | Build | Backend | Encryption | Use |
 |-------|---------|------------|-----|
-| `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | mattn/go-sqlite3 → SQLCipher | AES-256 page-level, at rest | **production** |
-| `CGO_ENABLED=0` | modernc.org/sqlite (pure Go) | none | CI tests / lint / local dev |
+| `CGO_ENABLED=0` (default) | vendored pure-Go engine + **hanzoai/sqlcipher** codec VFS | AES-256 page-level, at rest | **default** — CI, tests, pure-Go deploys |
+| `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | **hanzoai/csqlite** → SQLCipher | AES-256 page-level, at rest | the C engine, for speed |
 
-One import, one driver name, two backends:
+One import, one driver name, two backends, one format:
 
 ```go
 import _ "github.com/hanzoai/sqlite" // registers "sqlite" under both tags
 
-db, _ := sql.Open("sqlite", dsn)     // mattn+SQLCipher (cgo) or modernc (!cgo)
+db, _ := sql.Open("sqlite", dsn)     // pure-Go codec VFS (!cgo) or csqlite+SQLCipher (cgo)
 ```
 
-The pure-Go backend **cannot encrypt**. Demanding a key on it
-(`Open(path, WithKey(...))`, `OpenDB(path, key)`) returns
-`ErrEncryptionUnavailable` and writes nothing — it never silently persists
-plaintext.
+The pure-Go backend **always encrypts** — no cgo, no external C library, nothing
+to link, and **`go list -m all` shows zero `modernc.org/*`** (the engine is
+vendored in-tree). A keyed database is single-writer, single-process (WAL on an
+in-process wal-index).
 
-## Building the encrypted (production) backend — READ THIS
+## Building the CGO backend (optional, for the C engine's speed)
 
-mainline `mattn/go-sqlite3` has **no `sqlcipher` build tag** and no
-`sqlite3_key()` binding. SQLCipher works only when you:
-
-1. link the **system** sqlite (the `libsqlite3` tag) against **libsqlcipher**, and
-2. enable the codec + URI keying via CGO flags, and
-3. supply the key as SQLCipher's **native URI `key` parameter** so it is applied
-   inside `sqlite3_open_v2` — *before* mattn's pragma battery runs.
+The default `CGO_ENABLED=0` build already encrypts and needs no flags. The CGO
+backend uses hanzoai/csqlite linked against libsqlcipher, with the key supplied as
+SQLCipher's native URI `key` parameter (applied inside `sqlite3_open_v2`, so create
+and reopen both work):
 
 ```sh
 CGO_ENABLED=1 \
@@ -41,25 +39,13 @@ CGO_LDFLAGS="-L<sqlcipher>/lib -lsqlcipher" \
 go build -tags "libsqlite3 sqlite_fts5" ./...
 ```
 
-Alpine: `apk add gcc musl-dev sqlcipher-dev pkgconfig`.
+Alpine: `apk add gcc musl-dev sqlcipher-dev pkgconfig`. A cgo build that forgets
+to link libsqlcipher silently writes plaintext; `CodecLinked()` proves the codec
+at runtime and `TestEncryptionProof` fails such a build.
 
-### Why not `-tags sqlcipher` + `PRAGMA key` in a ConnectHook?
-
-Both are traps that ship **plaintext**:
-
-- `-tags sqlcipher` is inert in mainline mattn (no such tag) → links plain
-  sqlite → `PRAGMA key` is a silent no-op.
-- mattn runs `PRAGMA busy_timeout/journal_mode/foreign_keys/...` via
-  `sqlite3_exec` **before** the ConnectHook fires. On an existing encrypted file
-  that touches the header before the key is set → `file is not a database` on
-  reopen. So a ConnectHook can *create* but never *reopen* a SQLCipher DB.
-
-The URI `key` parameter sidesteps both: SQLCipher's VFS keys the connection at
-open time. `TestEncryptionProof` asserts real ciphertext on disk and a working
-keyed reopen, so a mis-linked build **fails CI** instead of shipping plaintext.
-
-> The key rides the DSN (`file:PATH?...&key=x'HEX'`). **Never log the DSN.**
-> IAM keeps `showSql=false` and does not log it.
+> On the CGO backend the key rides the DSN (`file:PATH?...&key=x'HEX'`). **Never
+> log the DSN.** On the pure-Go backend the key never touches the DSN — it binds
+> to the codec VFS.
 
 ## Encryption
 
