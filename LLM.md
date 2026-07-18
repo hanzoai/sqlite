@@ -90,6 +90,33 @@ so the VFS (and the DEK) are torn down exactly when the `*sql.DB` closes.
 - `driver_cgo.go` (`//go:build cgo`) — registers `sqlite`→**hanzoai/csqlite**; keys via SQLCipher URI `key=x'HEX'`; path percent-escaped so `?`/`#` can't strip `key=`.
 - `internal/engine/**` — the vendored pure-Go SQLite engine (fork; see above).
 - `encryption_proof_test.go`, `sqlcipher_pure_test.go` — anti-silent-plaintext gate + pure-Go WAL round-trip + byte-compat both directions (opens a C-written fixture; decrypts driver-written bytes with the standalone codec).
+- `checkpoint_concurrent_test.go` — the concurrent-checkpoint verification bar (below).
+
+### Drop-in named API (backend-neutral, restored on the self-contained fork)
+
+These are the surface consumers use beyond `sql.Open("sqlite",…)`; each is one
+tag-neutral file + `_cgo`/`_nocgo` backend halves (engine under !cgo, csqlite
+under cgo), so the SAME calls compile and run under both backends:
+
+- `pragma.go` — `Pragma{Name,Value}`, `DefaultPragmas`; `pragma_{cgo,nocgo}.go` — `PragmaDSN` (each backend's DSN pragma syntax).
+- `connector.go` — `OpenPragma(dsn, pragmas)`: opens a `*sql.DB` that applies the pragmas on EVERY pooled connection (the only backend-neutral way to set `wal_autocheckpoint=0` — csqlite drops it from the DSN). Owns the tag-neutral `driverName`.
+- `filecontrol_{cgo,nocgo}.go` — `SetPersistWAL(rawConn, on)` (SQLITE_FCNTL_PERSIST_WAL; replicate needs the `-wal` retained across close).
+- `hooks.go` + `hooks_{cgo,nocgo}.go` — `HookRegisterer`, `CommitHookRegisterer(driverConn)`. `CommitHookFn` is a **type alias** for the engine's under !cgo, so the raw engine conn satisfies `HookRegisterer` directly (Hanzo Base asserts `driverConn.(sqlite.HookRegisterer)` on the raw conn — no bridge).
+- `connhook_nocgo.go` — `Driver`, `ConnectionHookFn`, `ExecQuerierContext`, `RegisterConnectionHook`: re-exports of the pure-Go engine's connection-hook feature so external HA layers (`litesql/go-sqlite-ha`, used by base-ha) migrate off modernc without importing internal packages. !cgo only (no CGO analogue).
+- `errcodes*.go` — `IsConstraint{Unique,PrimaryKey,ForeignKey}` (backend-neutral extended-code classification).
+
+## Concurrent checkpoint under load
+
+`TestConcurrentCheckpointUnderLoad` is the bar for the locking property WAL-shipping
+replication (hanzoai/replicate) depends on: TRUNCATE-checkpoint on one connection
+while writers hammer another, asserting no hard `SQLITE_BUSY`, the checkpoint
+completes, and no committed frame is lost. The engine BLOCKS correctly on
+`busy_timeout` (measured: a checkpoint waits out a 700ms-held writer lock then
+truncates). Note: replicate's own `TestDB_CheckpointPageGapWithConcurrentWrites`
+is a **flaky race** (its writer has no busy_timeout and hammers), not a version
+regression — clean serial pass rate is fork(3.53.2) 9/12 == modernc v1.44.3 9/12 >
+v1.48.0 7/12. Basing the engine on v1.44.3 does NOT fix it and would downgrade the
+SQLite. A well-behaved writer (busy_timeout set, as in the bar test) is reliable.
 
 ## Envelope encryption — rotation-safe (read before touching key handling)
 
@@ -131,6 +158,15 @@ Hanzo IAM / cloud (`cek/cek.go`, per-principal encrypted stores):
 
 ## Versioning
 
-PATCH bumps only. Current: **v0.3.1** — pure-Go backend now ENCRYPTS via the
-vendored engine + hanzoai/sqlcipher codec VFS (was: `ErrEncryptionUnavailable`);
-zero `modernc.org/*` modules; CGO backend migrated mattn/go-sqlite3 → hanzoai/csqlite.
+PATCH bumps only.
+
+- **v0.3.2** — restored the backend-neutral drop-in named API on the self-contained
+  fork (`OpenPragma`/`Pragma`/`PragmaDSN`, `SetPersistWAL`, `HookRegisterer`/
+  `CommitHookFn`/`CommitHookRegisterer`, `IsConstraint*`, and `Driver`/
+  `ConnectionHookFn`/`ExecQuerierContext`/`RegisterConnectionHook` re-exports) so
+  replicate + Base + base-ha migrate off modernc with zero code churn; `CommitHookFn`
+  aliases the engine's under !cgo so raw-conn `HookRegisterer` assertions work. Added
+  `TestConcurrentCheckpointUnderLoad`. No `modernc.org/*`.
+- **v0.3.1** — pure-Go backend now ENCRYPTS via the vendored engine + hanzoai/sqlcipher
+  codec VFS (was: `ErrEncryptionUnavailable`); zero `modernc.org/*` modules; CGO backend
+  migrated mattn/go-sqlite3 → hanzoai/csqlite.
