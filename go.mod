@@ -3,19 +3,14 @@ module github.com/hanzoai/sqlite
 go 1.26.4
 
 require (
-	github.com/mattn/go-sqlite3 v1.14.47
+	github.com/dustin/go-humanize v1.0.1
+	github.com/google/uuid v1.6.0
+	github.com/hanzoai/sqlcipher v0.1.0
+	github.com/mattn/go-isatty v0.0.20
+	github.com/ncruces/go-strftime v1.0.0
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec
 	golang.org/x/crypto v0.50.0
-	modernc.org/sqlite v1.48.0
+	golang.org/x/sys v0.46.0
 )
 
-require (
-	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/sys v0.43.0 // indirect
-	modernc.org/libc v1.70.0 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.11.0 // indirect
-)
+require github.com/hanzoai/csqlite v0.1.0

@@ -1,30 +1,34 @@
 // Package sqlite provides an encrypted SQLite driver for Hanzo.
 //
-// It is dual-backend and registers the database/sql driver name "sqlite"
-// under BOTH build configurations, exposing the same public API either way:
+// Both backends encrypt at rest, in the SAME SQLCipher-4 on-disk format, and a
+// database written by one opens under the other. The driver registers the
+// database/sql driver name "sqlite" under BOTH build configurations, exposing the
+// same public API either way:
 //
-//   - CGO  (//go:build cgo)  → mattn/go-sqlite3 + SQLCipher: page-level
-//     AES-256 encryption at rest. This is the production engine. Build with:
+//   - !CGO (//go:build !cgo) → the vendored pure-Go SQLite engine
+//     (internal/engine) plus the hanzoai/sqlcipher codec VFS: page-level AES-256
+//     encryption at rest, with NO cgo and NO external C library. This is what
+//     CGO-off CI, tests, lint, and pure-Go deployments run. Nothing to link, no
+//     amalgamation to build — it always encrypts.
+//   - CGO  (//go:build cgo)  → hanzoai/csqlite + libsqlcipher: the same page-level
+//     AES-256 format via the C codec, for builds that want the C engine's speed.
+//     Build with:
 //     CGO_ENABLED=1 \
 //     CGO_CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 -I<sqlcipher>/include/sqlcipher" \
 //     CGO_LDFLAGS="-lsqlcipher" \
 //     go build -tags "libsqlite3 sqlite_fts5"
-//     NOTE: the `sqlcipher` tag is INERT in mainline mattn (ships PLAINTEXT);
-//     the real recipe is the `libsqlite3` tag linked against libsqlcipher with
-//     the codec + URI flags above.
-//   - !CGO (//go:build !cgo) → modernc.org/sqlite (pure Go): NO encryption.
-//     Used only for CGO-off CI (test + lint) and local dev. Demanding a key
-//     on this backend is a hard error — it never silently stores plaintext.
+//     A cgo build that forgets to link libsqlcipher silently writes plaintext;
+//     CodecLinked() proves the codec at runtime so such a build fails CI.
 //
-// Because the "sqlite" driver name is registered under both tags, any code
-// doing `_ "github.com/hanzoai/sqlite"` + `sql.Open("sqlite", dsn)` (e.g. Hanzo
-// IAM's xorm engine) compiles and runs in CGO-off CI and runs encrypted in the
-// CGO production build — one import, one driver name, two backends.
+// Because the "sqlite" driver name is registered under both tags, any code doing
+// `_ "github.com/hanzoai/sqlite"` + `sql.Open("sqlite", dsn)` (e.g. Hanzo IAM's
+// xorm engine) compiles and runs encrypted under both — one import, one driver
+// name, two backends, one format.
 //
-// The encryption key, replication mode, threshold config, and per-principal
-// CEK derivation (cek.go, threshold.go) are pure Go and live in tag-neutral
-// files; only the database/sql driver registration and the connect-time pragma
-// application differ by build tag (driver_cgo.go / driver_nocgo.go).
+// The encryption key, replication mode, threshold config, and per-principal CEK
+// derivation (cek.go, threshold.go) are pure Go and live in tag-neutral files;
+// only the database/sql driver registration and the connect-time keying differ by
+// build tag (driver_cgo.go / driver_nocgo.go).
 package sqlite
 
 import (
@@ -132,16 +136,17 @@ func (db *DB) Encrypted() bool {
 
 // CodecLinked reports whether at-rest encryption is ACTUALLY working in this
 // process — not merely advertised. EncryptionAvailable() is a backend-capability
-// flag (true for any CGO build), but a CGO build that forgot to link
+// flag (true under both build tags), but a CGO build that forgot to link
 // libsqlcipher silently writes PLAINTEXT. CodecLinked proves the codec at
 // runtime: it opens a temp DB under a key, writes a marker, and checks the
 // on-disk bytes are real ciphertext (no plaintext "SQLite format 3" header,
 // marker absent).
 //
-// Use it to gate encryption assertions in tests: a properly-linked build runs
-// them; a CGO-without-codec build SKIPS instead of failing on plaintext (the
-// Dockerfile build, which links libsqlcipher, is where the hard ciphertext gate
-// runs). Returns false on the pure-Go backend.
+// The pure-Go backend always returns true — its codec VFS is compiled in, nothing
+// to mis-link. On the CGO backend it returns true only when libsqlcipher is
+// actually linked. Use it to gate encryption assertions in tests: the pure-Go
+// build and a correctly-linked CGO build run them; a CGO-without-codec build SKIPS
+// instead of failing on plaintext (the Dockerfile build is the hard gate there).
 func CodecLinked() bool {
 	if !EncryptionAvailable() {
 		return false
