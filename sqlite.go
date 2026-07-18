@@ -192,9 +192,11 @@ func CodecLinked() bool {
 
 // Open opens an encrypted, optionally distributed SQLite database.
 //
-// Under the !cgo backend, passing an encryption key (WithKey/WithRawKey/
-// WithPrincipalKey) is a hard error: the pure-Go engine cannot encrypt and we
-// refuse to silently persist plaintext when a caller asked for encryption.
+// A key (WithKey/WithRawKey/WithPrincipalKey) encrypts at rest under BOTH
+// backends in the same SQLCipher-4 format: the pure-Go engine keys through the
+// hanzoai/sqlcipher codec VFS, the CGO engine through libsqlcipher. A 32-byte
+// key is required; EncryptionAvailable() is true either way, so the only reason
+// Open rejects a key is a wrong length (never "no encryption on this backend").
 func Open(path string, opts ...Option) (*DB, error) {
 	cfg := Config{Mode: ModeSingle}
 	for _, o := range opts {
