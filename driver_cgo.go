@@ -4,7 +4,6 @@ package sqlite
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -15,10 +14,6 @@ import (
 
 	sqlite3 "github.com/hanzoai/csqlite"
 )
-
-// ErrEncryptionUnavailable is returned when an encryption key is supplied to a
-// backend that cannot encrypt. Never returned by the CGO backend.
-var ErrEncryptionUnavailable = errors.New("sqlite: encryption requested but this build has no SQLCipher backend (build with CGO_ENABLED=1 -tags libsqlite3 linked against libsqlcipher)")
 
 // init registers the "sqlite" database/sql driver name — the same name
 // modernc.org/sqlite registers under the !cgo backend — backed here by
@@ -51,34 +46,28 @@ func init() {
 	sql.Register("sqlite", &sqlite3.SQLiteDriver{})
 }
 
-// EncryptionAvailable reports whether this build ACTUALLY encrypts at rest, as
-// proven by a cached one-time runtime probe — NOT a compile-time constant.
+// CodecLinked reports whether the SQLCipher C codec is linked and ACTUALLY
+// encrypting, proven by a cached one-time runtime probe — NOT a compile-time
+// constant.
 //
-// The distinction is the whole point. A CGO build only encrypts if the SQLite it
-// links is SQLCipher. A CGO build that links plain sqlite (the vendored
-// amalgamation, or libsqlcipher simply absent) SILENTLY no-ops the key and writes
-// PLAINTEXT — the file gets a "SQLite format 3\0" header and the rows land in the
-// clear. A compile-time `return true` cannot tell those builds apart, so it
-// reported "available" for a build that ships plaintext.
+// The distinction is the whole point. A cgo build only has a live C codec if the
+// SQLite it links is SQLCipher. A cgo build that links plain sqlite (the vendored
+// amalgamation, or libsqlcipher absent) SILENTLY no-ops PRAGMA key and writes
+// PLAINTEXT. A compile-time `return true` could not tell those apart, so it once
+// reported the codec linked for a build that ships plaintext.
 //
 // This probes the linked engine at runtime (codecEncrypts): open a throwaway keyed
 // database, write a sentinel, and confirm the bytes on disk are real ciphertext
-// that round-trips under the key. The result is cached (the probe runs once). A
-// build that cannot truly encrypt reports false here, and the keyed-open gate in
-// openDB then FAILS CLOSED (ErrEncryptionUnavailable) instead of writing plaintext.
-func EncryptionAvailable() bool { return encryptionProbe() }
-
-// CodecLinked reports whether the SQLCipher C codec is linked and encrypting. On
-// the CGO backend encryption IS the C codec, so this is exactly EncryptionAvailable
-// (same cached probe); it is the name money/data consumers use to guard a keyed
-// open at boot. On the pure-Go backend it is always false (that backend never
-// links the C codec — see driver_nocgo.go).
+// that round-trips under the key. The result is cached. When it is true, openDB
+// uses the live libsqlcipher codec (per-commit durability); when it is FALSE, openDB
+// falls back to the pure-Go SQLCipher codec envelope (envelope.go), which encrypts
+// without libsqlcipher — so a keyed store is encrypted either way, never plaintext.
 func CodecLinked() bool { return encryptionProbe() }
 
-// probeOverride is a test-only seam (0 = use the real probe, 1 = force encrypts,
-// 2 = force plaintext-fallback). It lets the in-package fail-closed test simulate
-// a mis-linked codec without an actual plain-sqlite link. It is checked BEFORE the
-// cached probe so a test override always wins.
+// probeOverride is a test-only seam (0 = use the real probe, 1 = force live-codec,
+// 2 = force codec-broken). It lets the in-package tests exercise both openDB routes
+// — live libsqlcipher and the pure-Go envelope fallback — without an actual
+// plain-sqlite link. It is checked BEFORE the cached probe so a test override wins.
 var probeOverride int32
 
 var (
@@ -86,7 +75,7 @@ var (
 	probeVal  bool
 )
 
-// encryptionProbe returns the cached codec-capability answer, honoring a test
+// encryptionProbe returns the cached "is the C codec live" answer, honoring a test
 // override first. codecEncrypts runs at most once.
 func encryptionProbe() bool {
 	switch atomic.LoadInt32(&probeOverride) {
@@ -112,18 +101,19 @@ var probeKey = func() []byte {
 	return k
 }()
 
-// codecEncrypts is the runtime measurement behind EncryptionAvailable: it proves
-// the linked engine really encrypts. It opens a throwaway keyed database, writes a
-// sentinel, and checks (a) the bytes on disk are ciphertext (no plaintext SQLite
+// codecEncrypts is the runtime measurement behind CodecLinked: it proves whether
+// the linked C engine really encrypts. It opens a throwaway keyed database, writes
+// a sentinel, and checks (a) the bytes on disk are ciphertext (no plaintext SQLite
 // header, sentinel absent — encryptsAtRest) and (b) a keyed reopen reads the
-// sentinel back. Any failure ⇒ false (fail closed: if it cannot be PROVEN the
-// build encrypts, it is treated as if it cannot).
+// sentinel back. Any failure ⇒ false, and openDB then routes keyed opens to the
+// pure-Go codec envelope instead of the live path — so a false result degrades to
+// the pure-Go codec, it never degrades to plaintext.
 //
-// It opens through the RAW driver (sql.Open, not openDB) on purpose: openDB is the
-// keyed-open gate this measurement feeds, so routing the probe through it would
-// recurse (openDB → EncryptionAvailable → codecEncrypts → openDB). The probe is
-// the one place a key legitimately reaches the backend ungated — it is measuring
-// the gate's answer, not passing through it.
+// It opens through the RAW driver (sql.Open, not openDB) on purpose: openDB
+// consults this measurement to choose its route, so routing the probe through it
+// would recurse (openDB → CodecLinked → codecEncrypts → openDB). The probe is the
+// one place a key reaches the live backend directly — it is measuring the codec's
+// behaviour, not passing through the router.
 func codecEncrypts() bool {
 	dir, err := os.MkdirTemp("", "hanzo-sqlite-codec-probe-")
 	if err != nil {
@@ -178,18 +168,20 @@ func OpenDB(path string, rawKey []byte) (*sql.DB, error) {
 	return openDB(path, &Config{RawKey: rawKey})
 }
 
-// openDB opens the database on the csqlite/SQLCipher backend using the SQLCipher
-// URI key parameter (keyed at open time, reopen-safe).
+// openDB is the single funnel BOTH Open and OpenDB pass through, so the keyed-open
+// route lives here. A keyed store is ALWAYS encrypted:
 //
-// It is the single funnel BOTH Open and OpenDB pass through, so the keyed-open
-// gate lives here: a keyed open on a build whose codec is not actually encrypting
-// (EncryptionAvailable() == false) FAILS CLOSED with ErrEncryptionUnavailable and
-// creates no file, rather than handing the key to a plain-sqlite engine that would
-// no-op it and write PLAINTEXT. This is what closes the OpenDB bypass (cek/openKeyed
-// calls OpenDB directly, not Open).
+//   - CodecLinked() true  → the live libsqlcipher codec via the SQLCipher URI key
+//     parameter (keyed inside sqlite3_open_v2, reopen-safe; per-commit durability).
+//   - CodecLinked() false → the pure-Go SQLCipher codec envelope (envelope.go),
+//     which encrypts without libsqlcipher. This is why a cgo build without a working
+//     libsqlcipher still encrypts — it falls back to the pure-Go codec, never to
+//     plaintext, and there is no dead end.
+//
+// A nil key opens unencrypted (the dev/global/default engine).
 func openDB(path string, cfg *Config) (*sql.DB, error) {
-	if cfg.RawKey != nil && !EncryptionAvailable() {
-		return nil, ErrEncryptionUnavailable
+	if cfg.RawKey != nil && !CodecLinked() {
+		return openEnvelope(path, cfg.RawKey)
 	}
 	db, err := sql.Open("sqlite", DSN(path, cfg.RawKey))
 	if err != nil {

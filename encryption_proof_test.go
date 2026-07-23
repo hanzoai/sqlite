@@ -7,24 +7,17 @@ import (
 	"testing"
 )
 
-// TestEncryptionProof is the anti-silent-plaintext gate.
+// TestEncryptionProof is the anti-silent-plaintext gate: a keyed store is ALWAYS
+// ciphertext at rest, on every backend.
 //
-// It keys off EncryptionAvailable(), which is now an honest runtime probe (not a
-// compile-time flag), so exactly one of two things must hold:
-//
-//   - EncryptionAvailable() == false — either the pure-Go backend OR a cgo build
-//     whose codec is not actually linked (plain sqlite). A keyed Open MUST fail
-//     closed (ErrEncryptionUnavailable) and write NO file. This branch is the fix
-//     for the silent-plaintext bug: a mis-linked cgo build lands HERE now, instead
-//     of falsely reporting available and shipping plaintext.
-//   - EncryptionAvailable() == true — the probe PROVED the linked engine encrypts.
-//     Assert it end to end: ciphertext on disk (no "SQLite format 3" header, marker
-//     absent), a keyed reopen reads the row back, and a wrong key is rejected.
-//
-// No skip, no SQLITE_REQUIRE_CODEC escape hatch: the probe makes "available" mean
-// "actually encrypts", so a build that would ship plaintext can never reach the
-// ciphertext branch, and can never go green on a plaintext file.
+// EncryptionAvailable() is always true, so there is no refuse branch: whether the
+// key is applied by the live libsqlcipher codec or by the pure-Go codec envelope,
+// Open(key) must write ciphertext (no "SQLite format 3" header, marker absent), a
+// keyed reopen must read the row back, and a wrong key must be rejected. A build
+// that would ship plaintext can never pass this.
 func TestEncryptionProof(t *testing.T) {
+	skipIfNoEnvelopeScratch(t)
+
 	const marker = "anti-plaintext-canary-7f3a"
 	key := make([]byte, 32)
 	for i := range key {
@@ -34,23 +27,9 @@ func TestEncryptionProof(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "proof.db")
 
-	if !EncryptionAvailable() {
-		// No real encryption (pure-Go, or cgo without libsqlcipher): a keyed Open
-		// must be refused, with no file created — never a silent plaintext write.
-		if _, err := Open(dbPath, WithRawKey(key)); err != ErrEncryptionUnavailable {
-			t.Fatalf("Open with key on a non-encrypting build: got err=%v, want ErrEncryptionUnavailable", err)
-		}
-		if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
-			t.Fatalf("a refused encrypted open created a file: %v", statErr)
-		}
-		return
-	}
-
-	// EncryptionAvailable() == true: the probe proved the codec encrypts. Prove the
-	// bytes on disk are ciphertext.
 	db, err := Open(dbPath, WithRawKey(key))
 	if err != nil {
-		t.Fatalf("cgo Open with key: %v", err)
+		t.Fatalf("Open with key: %v", err)
 	}
 	if _, err := db.Exec(`CREATE TABLE c (v TEXT)`); err != nil {
 		t.Fatalf("create: %v", err)
@@ -67,10 +46,10 @@ func TestEncryptionProof(t *testing.T) {
 		t.Fatalf("read db file: %v", err)
 	}
 	if bytes.HasPrefix(raw, []byte("SQLite format 3\x00")) {
-		t.Fatal("ENCRYPTION FAILURE: encrypted db has a plaintext SQLite header — libsqlcipher is not linked (build with -tags libsqlite3 + libsqlcipher, CGO_CFLAGS=-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1)")
+		t.Fatal("ENCRYPTION FAILURE: keyed db has a plaintext SQLite header — the key was not applied")
 	}
 	if bytes.Contains(raw, []byte(marker)) {
-		t.Fatal("ENCRYPTION FAILURE: plaintext marker found in encrypted db file — data is NOT encrypted at rest")
+		t.Fatal("ENCRYPTION FAILURE: plaintext marker found in keyed db file — data is NOT encrypted at rest")
 	}
 
 	// Reopen-with-key must read the row back (proves keyed reopen works).
@@ -87,7 +66,8 @@ func TestEncryptionProof(t *testing.T) {
 		t.Fatalf("reopen read = %q, want %q", got, marker)
 	}
 
-	// A different key must be rejected on reopen.
+	// A different key must be rejected on reopen — the envelope fails at DecryptFile
+	// (page-1 authentication), the live codec at the first query.
 	wrong := make([]byte, 32)
 	copy(wrong, key)
 	wrong[0] ^= 0xFF
@@ -99,6 +79,20 @@ func TestEncryptionProof(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("ENCRYPTION FAILURE: wrong key read succeeded — key is not enforced")
+	}
+}
+
+// skipIfNoEnvelopeScratch skips a test that would exercise the pure-Go codec
+// envelope on a host with no RAM-backed scratch dir (the envelope fails closed
+// there rather than decrypt to disk). When the live libsqlcipher codec is linked
+// (CodecLinked), the envelope is not used and no scratch is needed.
+func skipIfNoEnvelopeScratch(t *testing.T) {
+	t.Helper()
+	if CodecLinked() {
+		return
+	}
+	if _, err := ramfsBase(); err != nil {
+		t.Skipf("pure-Go codec envelope needs RAM-backed scratch (tmpfs): %v", err)
 	}
 }
 

@@ -1,45 +1,46 @@
-// Package sqlite provides an encrypted SQLite driver for Hanzo.
+// Package sqlite provides an at-rest-encrypted SQLite driver for Hanzo.
 //
-// It is dual-backend and registers the database/sql driver name "sqlite"
-// under BOTH build configurations, exposing the same public API either way:
+// ONE WAY, ALWAYS ENCRYPTED. A keyed store is encrypted on EVERY build — there is
+// no build tag, environment switch, or missing C library under which it falls back
+// to plaintext. EncryptionAvailable() is always true. The SQLCipher 4 page format
+// is the single at-rest format, produced two byte-compatible ways:
 //
-//   - CGO  (//go:build cgo && !sqlite_purego) → hanzoai/csqlite + SQLCipher:
-//     page-level AES-256 encryption at rest. This is the production engine.
-//     csqlite is the forked go-sqlite3 cgo bindings, vendored so nothing is
-//     imported from mattn. Build with:
+//   - The pure-Go hanzoai/sqlcipher codec (the default, works everywhere): a keyed
+//     open decrypts the file to a RAM-backed plaintext copy, the engine reads and
+//     writes that copy, and Close/Checkpoint re-encrypts it to the real path
+//     (envelope.go). This needs no C toolchain and no libsqlcipher, so native Go
+//     (CGO_ENABLED=0) ALWAYS encrypts.
+//   - The live libsqlcipher codec (an optional acceleration on cgo builds that link
+//     it): page-level AES-256 keyed inside sqlite3_open_v2, with per-commit
+//     durability. A cgo build links it with:
 //     CGO_ENABLED=1 \
 //     CGO_CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 -I<sqlcipher>/include/sqlcipher" \
 //     CGO_LDFLAGS="-lsqlcipher" \
 //     go build -tags "libsqlite3 sqlite_fts5"
-//     NOTE: the `sqlcipher` tag is INERT in the go-sqlite3 lineage (ships
-//     PLAINTEXT); the real recipe is the `libsqlite3` tag linked against
-//     libsqlcipher with the codec + URI flags above.
-//   - !CGO (//go:build !cgo || sqlite_purego) → modernc.org/sqlite (pure Go):
-//     NO encryption. Used for CGO-off CI (test + lint) and local dev. Demanding
-//     a key on this backend is a hard error — it never silently stores plaintext.
 //
-// OPT-OUT BUILD TAG `sqlite_purego`: forces the pure-Go (modernc) backend even
-// when CGO_ENABLED=1. The default is unchanged (cgo → SQLCipher), so encryption
-// consumers (Hanzo IAM's envelope-encrypted org DBs) are unaffected. The tag
-// exists for one reason: a binary that links this fork AND another package that
-// imports modernc.org/sqlite directly (e.g. a service embedding hanzoai/base,
-// commerce, o11y, orm or tasks) would, under a plain CGO_ENABLED=1 build,
-// register the database/sql "sqlite" driver TWICE — once here via csqlite, once
-// by modernc — and panic at init ("sql: Register called twice for driver sqlite").
-// Such a service that needs neither SQLCipher nor a C toolchain builds with
-// `-tags sqlite_purego`: this fork then routes to modernc too, so the whole
-// binary registers "sqlite" exactly once. (CGO_ENABLED=0 achieves the same and
-// is what those services ship in prod; the tag is for CGO-on local dev / tests.)
+// On a cgo build openDB uses the live codec when a runtime probe proves it encrypts
+// (CodecLinked), and otherwise FALLS BACK to the pure-Go codec envelope — so a
+// mis-linked libsqlcipher degrades to the pure-Go codec, never to plaintext. On the
+// pure-Go build a key always routes to the envelope. Either way the file on disk is
+// SQLCipher ciphertext, readable by the C library and by this package alike.
 //
-// Because the "sqlite" driver name is registered under both tags, any code
-// doing `_ "github.com/hanzoai/sqlite"` + `sql.Open("sqlite", dsn)` (e.g. Hanzo
-// IAM's xorm engine) compiles and runs in CGO-off CI and runs encrypted in the
-// CGO production build — one import, one driver name, two backends.
+// The database/sql driver name "sqlite" is registered under both build tags
+// (hanzoai/csqlite on cgo, modernc.org/sqlite on pure-Go), so any code doing
+// `_ "github.com/hanzoai/sqlite"` + `sql.Open("sqlite", dsn)` compiles and runs on
+// both — one import, one driver name, one encryption format.
 //
-// The encryption key, replication mode, threshold config, and per-principal
-// CEK derivation (cek.go, threshold.go) are pure Go and live in tag-neutral
-// files; only the database/sql driver registration and the connect-time pragma
-// application differ by build tag (driver_cgo.go / driver_nocgo.go).
+// OPT-OUT BUILD TAG `sqlite_purego`: forces the pure-Go (modernc) backend even when
+// CGO_ENABLED=1. It exists for one reason: a binary that links this fork AND another
+// package importing modernc.org/sqlite directly would, under a plain CGO_ENABLED=1
+// build, register the "sqlite" driver TWICE and panic at init. Such a service builds
+// with `-tags sqlite_purego` so the whole binary registers "sqlite" exactly once.
+// It does NOT change the encryption guarantee: the pure-Go backend also always
+// encrypts a keyed store, via the same codec.
+//
+// The encryption key, replication mode, threshold config, and per-principal CEK
+// derivation (cek.go, threshold.go) and the codec envelope (envelope.go) are pure
+// Go and tag-neutral; only the driver registration and the DSN pragma syntax differ
+// by build tag (driver_cgo.go / driver_nocgo.go).
 package sqlite
 
 import (
@@ -137,16 +138,18 @@ type DB struct {
 	config Config
 }
 
-// Encrypted reports whether this DB is backed by an at-rest-encrypted engine.
+// Encrypted reports whether this DB is encrypted at rest — true exactly when it was
+// opened with a key. A keyed store always encrypts (EncryptionAvailable is always
+// true), so the key alone decides it.
 func (db *DB) Encrypted() bool {
-	return db.config.RawKey != nil && EncryptionAvailable()
+	return db.config.RawKey != nil
 }
 
-// Open opens an encrypted, optionally distributed SQLite database.
-//
-// Under the !cgo backend, passing an encryption key (WithKey/WithRawKey/
-// WithPrincipalKey) is a hard error: the pure-Go engine cannot encrypt and we
-// refuse to silently persist plaintext when a caller asked for encryption.
+// Open opens an at-rest-encrypted (when keyed), optionally distributed SQLite
+// database. Passing an encryption key (WithKey/WithRawKey/WithPrincipalKey) always
+// encrypts, on every build: the SQLCipher codec (live libsqlcipher when linked,
+// otherwise the pure-Go codec envelope) keys the file. It never writes a keyed
+// store as plaintext.
 func Open(path string, opts ...Option) (*DB, error) {
 	cfg := Config{Mode: ModeSingle}
 	for _, o := range opts {
@@ -161,9 +164,8 @@ func Open(path string, opts ...Option) (*DB, error) {
 		}
 	}
 
-	// openDB is the single keyed-open gate (both Open and OpenDB funnel through it):
-	// a key on a build that cannot truly encrypt fails closed there with
-	// ErrEncryptionUnavailable and creates no file — never a silent plaintext write.
+	// openDB is the single keyed-open funnel (both Open and OpenDB pass through it);
+	// a key always routes to the SQLCipher codec, never to a plaintext write.
 	db, err := openDB(path, &cfg)
 	if err != nil {
 		return nil, err

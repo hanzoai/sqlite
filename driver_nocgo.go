@@ -4,54 +4,43 @@ package sqlite
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 
 	// modernc.org/sqlite registers the "sqlite" database/sql driver in its own
-	// init(). Blank-importing it here gives the !cgo build a working pure-Go
-	// "sqlite" driver — the same driver name the CGO backend registers — so
-	// CGO-off CI (tests + lint) and local dev run without a C toolchain.
+	// init(). Blank-importing it here gives the pure-Go build a working "sqlite"
+	// driver — the same driver name the cgo backend registers — so CGO-off CI,
+	// lint, and local dev run without a C toolchain.
 	//
-	// NOTE: this backend does NOT encrypt. Open() rejects any encryption key
-	// before reaching openDB, so plaintext is never silently written when a
-	// caller asked for encryption.
+	// A keyed store is NOT plaintext on this backend: openDB routes it through the
+	// pure-Go SQLCipher codec envelope (envelope.go), which always encrypts and is
+	// byte-compatible with the C libsqlcipher.
 	_ "modernc.org/sqlite"
 )
 
-// ErrEncryptionUnavailable is returned when an encryption key is supplied to
-// this pure-Go backend, which cannot encrypt at rest. The remediation must NOT
-// say `-tags sqlcipher` (that tag is inert in mainline mattn and ships
-// plaintext) — the real recipe is the libsqlite3 tag linked against libsqlcipher.
-var ErrEncryptionUnavailable = errors.New("sqlite: encryption requested but this build has no SQLCipher backend (build with CGO_ENABLED=1 -tags libsqlite3 linked against libsqlcipher)")
-
-// EncryptionAvailable reports that this build CANNOT encrypt at rest (always
-// false for the pure-Go backend). A keyed open therefore fails closed in openDB.
-func EncryptionAvailable() bool { return false }
-
 // CodecLinked reports whether the SQLCipher C codec is linked and encrypting. The
-// pure-Go backend never links the C codec, so it is always false — the name is
-// retained for API symmetry with the CGO backend (money/data consumers call it to
-// guard a keyed open regardless of which backend the binary linked).
+// pure-Go backend never links the C codec — encryption here is the pure-Go
+// hanzoai/sqlcipher codec (via the envelope), not the C library — so it is always
+// false. EncryptionAvailable is nonetheless true: a keyed store always encrypts.
+// The name is retained for API symmetry with the cgo backend.
 func CodecLinked() bool { return false }
 
-// OpenDB opens *path* as a database/sql DB on the pure-Go backend. A non-nil key
-// is a hard error: this backend cannot encrypt and must never silently persist
-// plaintext when a caller asked for encryption. Mirrors the CGO backend's
+// OpenDB opens *path* as a *sql.DB on the pure-Go backend. A non-nil key opens it
+// at-rest-encrypted through the SQLCipher codec envelope (byte-compatible with C
+// libsqlcipher); a nil key opens it unencrypted. Mirrors the cgo backend's
 // signature so callers compile identically under both build tags.
 func OpenDB(path string, rawKey []byte) (*sql.DB, error) {
 	return openDB(path, &Config{RawKey: rawKey})
 }
 
-// openDB opens the database on the pure-Go modernc backend. It is the single
-// funnel BOTH Open and OpenDB pass through, so the keyed-open gate lives here: a
-// configured key on a backend that cannot encrypt (EncryptionAvailable() == false)
-// FAILS CLOSED with ErrEncryptionUnavailable and creates no file, so a keyed open
-// never silently persists plaintext. Same predicate as the CGO backend's gate.
+// openDB is the single funnel both Open and OpenDB pass through. A key routes to
+// the pure-Go SQLCipher codec envelope, which ALWAYS encrypts — the pure-Go backend
+// has no plaintext fallback for a keyed store. A nil key opens plaintext (the
+// unencrypted dev/global/default engine).
 func openDB(path string, cfg *Config) (*sql.DB, error) {
-	if cfg.RawKey != nil && !EncryptionAvailable() {
-		return nil, ErrEncryptionUnavailable
+	if cfg.RawKey != nil {
+		return openEnvelope(path, cfg.RawKey)
 	}
 	db, err := sql.Open("sqlite", buildDSN(path, cfg))
 	if err != nil {
@@ -64,17 +53,13 @@ func buildDSN(path string, cfg *Config) string {
 	return DSN(path, nil)
 }
 
-// DSN builds a canonical IAM SQLite DSN for the active (pure-Go modernc)
-// backend. modernc uses the `_pragma=NAME(VALUE)` query form; the mattn-style
-// `_busy_timeout=N` params it silently IGNORES, so emitting the correct form
-// here is what actually applies WAL + busy_timeout on the !cgo path.
-//
-// rawKey MUST be nil — the pure-Go backend cannot encrypt. A non-nil key
-// triggers a panic rather than emitting a plaintext DSN, because reaching here
-// with a key means an upstream encryption guard was bypassed.
+// DSN builds an UNENCRYPTED modernc DSN for path (the `_pragma=NAME(VALUE)` form
+// modernc actually applies). The encryption key never rides the pure-Go DSN — the
+// codec envelope keys the file out of band — so a non-nil key here is a programming
+// error and panics rather than emit a DSN that would open the database plaintext.
 func DSN(path string, rawKey []byte) string {
 	if rawKey != nil {
-		panic("sqlite: DSN called with a key on the pure-Go backend — encryption is unavailable without CGO+SQLCipher")
+		panic("sqlite: DSN cannot carry a key on the pure-Go backend — the codec envelope keys the file; use OpenDB(path, key)")
 	}
 	params := []string{
 		"_pragma=busy_timeout(10000)",
