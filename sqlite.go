@@ -43,13 +43,10 @@
 package sqlite
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 )
 
 // Mode determines the replication strategy.
@@ -145,61 +142,6 @@ func (db *DB) Encrypted() bool {
 	return db.config.RawKey != nil && EncryptionAvailable()
 }
 
-// CodecLinked reports whether at-rest encryption is ACTUALLY working in this
-// process — not merely advertised. EncryptionAvailable() is a backend-capability
-// flag (true for any CGO build), but a CGO build that forgot to link
-// libsqlcipher silently writes PLAINTEXT. CodecLinked proves the codec at
-// runtime: it opens a temp DB under a key, writes a marker, and checks the
-// on-disk bytes are real ciphertext (no plaintext "SQLite format 3" header,
-// marker absent).
-//
-// Use it to gate encryption assertions in tests: a properly-linked build runs
-// them; a CGO-without-codec build SKIPS instead of failing on plaintext (the
-// Dockerfile build, which links libsqlcipher, is where the hard ciphertext gate
-// runs). Returns false on the pure-Go backend.
-func CodecLinked() bool {
-	if !EncryptionAvailable() {
-		return false
-	}
-	dir, err := os.MkdirTemp("", "sqlite-codec-probe-")
-	if err != nil {
-		return false
-	}
-	defer os.RemoveAll(dir)
-
-	const marker = "codec-probe-marker-3f9c"
-	path := filepath.Join(dir, "probe.db")
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i*3 + 5)
-	}
-	db, err := Open(path, WithRawKey(key))
-	if err != nil {
-		return false
-	}
-	if _, err := db.Exec(`CREATE TABLE p (v TEXT)`); err != nil {
-		db.Close()
-		return false
-	}
-	if _, err := db.Exec(`INSERT INTO p (v) VALUES (?)`, marker); err != nil {
-		db.Close()
-		return false
-	}
-	db.Close()
-
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	if bytes.HasPrefix(raw, []byte("SQLite format 3\x00")) {
-		return false // plaintext header => codec not linked
-	}
-	if bytes.Contains(raw, []byte(marker)) {
-		return false // marker visible => not encrypted
-	}
-	return true
-}
-
 // Open opens an encrypted, optionally distributed SQLite database.
 //
 // Under the !cgo backend, passing an encryption key (WithKey/WithRawKey/
@@ -217,11 +159,11 @@ func Open(path string, opts ...Option) (*DB, error) {
 		if n := len(cfg.RawKey); n != 32 {
 			return nil, fmt.Errorf("sqlite: encryption key must be 32 bytes, got %d", n)
 		}
-		if !EncryptionAvailable() {
-			return nil, ErrEncryptionUnavailable
-		}
 	}
 
+	// openDB is the single keyed-open gate (both Open and OpenDB funnel through it):
+	// a key on a build that cannot truly encrypt fails closed there with
+	// ErrEncryptionUnavailable and creates no file — never a silent plaintext write.
 	db, err := openDB(path, &cfg)
 	if err != nil {
 		return nil, err

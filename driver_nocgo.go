@@ -27,8 +27,14 @@ import (
 var ErrEncryptionUnavailable = errors.New("sqlite: encryption requested but this build has no SQLCipher backend (build with CGO_ENABLED=1 -tags libsqlite3 linked against libsqlcipher)")
 
 // EncryptionAvailable reports that this build CANNOT encrypt at rest (always
-// false for the pure-Go backend).
+// false for the pure-Go backend). A keyed open therefore fails closed in openDB.
 func EncryptionAvailable() bool { return false }
+
+// CodecLinked reports whether the SQLCipher C codec is linked and encrypting. The
+// pure-Go backend never links the C codec, so it is always false — the name is
+// retained for API symmetry with the CGO backend (money/data consumers call it to
+// guard a keyed open regardless of which backend the binary linked).
+func CodecLinked() bool { return false }
 
 // OpenDB opens *path* as a database/sql DB on the pure-Go backend. A non-nil key
 // is a hard error: this backend cannot encrypt and must never silently persist
@@ -38,11 +44,13 @@ func OpenDB(path string, rawKey []byte) (*sql.DB, error) {
 	return openDB(path, &Config{RawKey: rawKey})
 }
 
-// openDB opens the database on the pure-Go modernc backend. A configured key is
-// a programming error here: Open() returns ErrEncryptionUnavailable before this
-// is reached, but we defend the invariant at the boundary too.
+// openDB opens the database on the pure-Go modernc backend. It is the single
+// funnel BOTH Open and OpenDB pass through, so the keyed-open gate lives here: a
+// configured key on a backend that cannot encrypt (EncryptionAvailable() == false)
+// FAILS CLOSED with ErrEncryptionUnavailable and creates no file, so a keyed open
+// never silently persists plaintext. Same predicate as the CGO backend's gate.
 func openDB(path string, cfg *Config) (*sql.DB, error) {
-	if cfg.RawKey != nil {
+	if cfg.RawKey != nil && !EncryptionAvailable() {
 		return nil, ErrEncryptionUnavailable
 	}
 	db, err := sql.Open("sqlite", buildDSN(path, cfg))
