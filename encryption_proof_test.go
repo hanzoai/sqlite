@@ -9,17 +9,21 @@ import (
 
 // TestEncryptionProof is the anti-silent-plaintext gate.
 //
-// On the !cgo (pure-Go) backend, encryption is unavailable: Open with a key MUST
-// return ErrEncryptionUnavailable and never write a file.
+// It keys off EncryptionAvailable(), which is now an honest runtime probe (not a
+// compile-time flag), so exactly one of two things must hold:
 //
-// On the cgo backend, EncryptionAvailable() reports true — but that is only a
-// backend-capability flag. A cgo build that forgot to link libsqlcipher (e.g. a
-// regression back to the inert `-tags sqlcipher`) links plain sqlite and silently
-// writes PLAINTEXT. This test forces the issue: under cgo it writes a known
-// marker under a key and asserts the on-disk bytes are real ciphertext (no
-// "SQLite format 3" header, marker absent) AND that the data survives a reopen
-// with the same key. A mis-linked production build therefore FAILS CI instead of
-// shipping a plaintext database.
+//   - EncryptionAvailable() == false — either the pure-Go backend OR a cgo build
+//     whose codec is not actually linked (plain sqlite). A keyed Open MUST fail
+//     closed (ErrEncryptionUnavailable) and write NO file. This branch is the fix
+//     for the silent-plaintext bug: a mis-linked cgo build lands HERE now, instead
+//     of falsely reporting available and shipping plaintext.
+//   - EncryptionAvailable() == true — the probe PROVED the linked engine encrypts.
+//     Assert it end to end: ciphertext on disk (no "SQLite format 3" header, marker
+//     absent), a keyed reopen reads the row back, and a wrong key is rejected.
+//
+// No skip, no SQLITE_REQUIRE_CODEC escape hatch: the probe makes "available" mean
+// "actually encrypts", so a build that would ship plaintext can never reach the
+// ciphertext branch, and can never go green on a plaintext file.
 func TestEncryptionProof(t *testing.T) {
 	const marker = "anti-plaintext-canary-7f3a"
 	key := make([]byte, 32)
@@ -31,35 +35,19 @@ func TestEncryptionProof(t *testing.T) {
 	dbPath := filepath.Join(dir, "proof.db")
 
 	if !EncryptionAvailable() {
-		// Pure-Go backend: a keyed Open must be refused, with no file created.
+		// No real encryption (pure-Go, or cgo without libsqlcipher): a keyed Open
+		// must be refused, with no file created — never a silent plaintext write.
 		if _, err := Open(dbPath, WithRawKey(key)); err != ErrEncryptionUnavailable {
-			t.Fatalf("!cgo Open with key: got err=%v, want ErrEncryptionUnavailable", err)
+			t.Fatalf("Open with key on a non-encrypting build: got err=%v, want ErrEncryptionUnavailable", err)
 		}
 		if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
-			t.Fatalf("!cgo backend created a file for a refused encrypted open: %v", statErr)
+			t.Fatalf("a refused encrypted open created a file: %v", statErr)
 		}
 		return
 	}
 
-	// CGO build advertised as encryption-capable, but the codec may not be
-	// linked (a CGO build without libsqlcipher silently writes plaintext). SKIP
-	// rather than fail in that case — the hard ciphertext gate runs in the
-	// Dockerfile build, which links libsqlcipher. CI pins CGO_ENABLED=0 (the
-	// refuse branch above); a local `-tags libsqlite3` + libsqlcipher build runs
-	// the full ciphertext assertions below.
-	//
-	// EXCEPTION: when SQLITE_REQUIRE_CODEC=1 the skip becomes a HARD FAILURE. The
-	// Dockerfile sets it so the image's own test stage cannot go green on the
-	// inert-tag recipe (the V7 "CI-theater" footgun): a build that claims to ship
-	// encryption but didn't link the codec FAILS here instead of skipping.
-	if !CodecLinked() {
-		if os.Getenv("SQLITE_REQUIRE_CODEC") == "1" {
-			t.Fatal("SQLITE_REQUIRE_CODEC=1 but CodecLinked()=false: this build advertises encryption (cgo) yet did NOT link libsqlcipher — it would ship PLAINTEXT. Build with -tags \"libsqlite3 sqlite_fts5\" + CGO_CFLAGS=-DSQLITE_HAS_CODEC -DSQLITE_USE_URI=1 + CGO_LDFLAGS=-lsqlcipher")
-		}
-		t.Skip("cgo build without libsqlcipher linked; encryption assertions skipped (Dockerfile build is the hard gate)")
-	}
-
-	// cgo backend with codec linked: prove the bytes on disk are ciphertext.
+	// EncryptionAvailable() == true: the probe proved the codec encrypts. Prove the
+	// bytes on disk are ciphertext.
 	db, err := Open(dbPath, WithRawKey(key))
 	if err != nil {
 		t.Fatalf("cgo Open with key: %v", err)
