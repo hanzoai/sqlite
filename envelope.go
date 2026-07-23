@@ -162,7 +162,31 @@ type envelopeConnector struct {
 }
 
 func (c *envelopeConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	return c.drv.Open(c.dsn)
+	conn, err := c.drv.Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	// Apply the connection pragmas as REAL PRAGMA statements, backend-neutral, not
+	// via the DSN. This is confidentiality-critical for temp_store=MEMORY on the
+	// cgo→envelope fallback path: mattn/csqlite SILENTLY DROPS `_temp_store=MEMORY`
+	// from a DSN, so without this SQLite would default temp_store=FILE and spill
+	// DECRYPTED temp b-trees (large ORDER BY, TEMP TABLE, VACUUM) to persistent disk
+	// — breaking "no plaintext at rest" on the exact safety-fallback path. Every
+	// backend's driver.Conn implements ExecerContext, so PRAGMA-per-connection takes
+	// effect either way (same technique as OpenPragma). Order follows DefaultPragmas
+	// (busy_timeout first, before journal_mode=WAL).
+	execer, ok := conn.(driver.ExecerContext)
+	if !ok {
+		_ = conn.Close()
+		return nil, fmt.Errorf("sqlite: envelope conn %T is not a driver.ExecerContext", conn)
+	}
+	for _, p := range DefaultPragmas {
+		if _, err := execer.ExecContext(ctx, "PRAGMA "+p.Name+" = "+p.Value, nil); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("sqlite: envelope apply PRAGMA %s = %s: %w", p.Name, p.Value, err)
+		}
+	}
+	return conn, nil
 }
 func (c *envelopeConnector) Driver() driver.Driver { return c.drv }
 func (c *envelopeConnector) Close() error          { return c.env.seal() }
@@ -264,14 +288,17 @@ func checkpointQuiesce(plainPath string) error {
 	return err
 }
 
-// plainDSN builds the keyless DSN the envelope opens the plaintext RAM copy with,
-// rendered in the active backend's pragma syntax (PragmaDSN). It deliberately does
-// NOT use cache=shared: the copy is single-writer (MaxOpenConns 1), and a shared
-// in-process page cache would both hold DECRYPTED pages for other connections and
-// keep the file locked across the seal reopen (turning the checkpoint into a
-// busy_timeout wait).
+// plainDSN builds the keyless DSN the envelope opens the plaintext RAM copy with.
+// It is a BARE file DSN: the connection pragmas (including the confidentiality-
+// critical temp_store=MEMORY) are applied by envelopeConnector.Connect as real
+// PRAGMA statements, backend-neutral, because a DSN carries them in a backend-
+// specific syntax that the OTHER backend silently drops (mattn ignores `_pragma=`,
+// modernc ignores `_busy_timeout=`). It also omits cache=shared deliberately: the
+// copy is single-writer (MaxOpenConns 1), and a shared in-process page cache would
+// hold DECRYPTED pages for other connections and keep the file locked across the
+// seal reopen (turning the checkpoint into a busy_timeout wait).
 func plainDSN(plainPath string) string {
-	return PragmaDSN(plainPath, DefaultPragmas)
+	return "file:" + escapeDBPath(plainPath)
 }
 
 // encryptToPath encrypts the plaintext database at plainPath to realPath with the

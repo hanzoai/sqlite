@@ -70,6 +70,30 @@ func TestKeyedRoundTripAndCheckpoint(t *testing.T) {
 	}
 }
 
+// TestKeyedTempStoreMemory asserts the envelope connection keeps temp b-trees in
+// RAM (temp_store=MEMORY) on the pure-Go backend, where the plaintext copy is opened
+// by modernc — a temp-file spill there would be decrypted data on disk. Skipped when
+// the live libsqlcipher codec is used (it encrypts its own temp spills).
+func TestKeyedTempStoreMemory(t *testing.T) {
+	if CodecLinked() {
+		t.Skip("live libsqlcipher codec encrypts its own temp spills; temp_store is not the guard there")
+	}
+	skipIfNoEnvelopeScratch(t)
+	key := make([]byte, 32)
+	db, err := OpenDB(filepath.Join(t.TempDir(), "ts.db"), key)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close()
+	var ts int
+	if err := db.QueryRow("PRAGMA temp_store").Scan(&ts); err != nil {
+		t.Fatalf("read temp_store: %v", err)
+	}
+	if ts != 2 {
+		t.Fatalf("temp_store = %d, want 2 (MEMORY)", ts)
+	}
+}
+
 // TestKeyedWrongKeyRejected proves a wrong key never yields data: the envelope
 // fails at DecryptFile (page-1 authentication), the live codec at the query.
 func TestKeyedWrongKeyRejected(t *testing.T) {
@@ -105,6 +129,26 @@ func TestKeyedWrongKeyRejected(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("wrong key read succeeded — key is not enforced")
+	}
+}
+
+// TestOpenDBRejectsWrongKeyLength proves OpenDB rejects a non-32-byte key on BOTH
+// the live-libsqlcipher path and the envelope path — otherwise SQLCipher would
+// silently reinterpret a wrong-length `key=x'HEX'` blob as a passphrase (a
+// different, weaker key), and OpenDB (unlike Open) had no length check.
+func TestOpenDBRejectsWrongKeyLength(t *testing.T) {
+	for _, n := range []int{0, 16, 31, 33, 64} {
+		if n == 0 {
+			continue // nil-key means unencrypted; a 0-length non-nil key:
+		}
+		key := make([]byte, n)
+		path := filepath.Join(t.TempDir(), "kl.db")
+		if _, err := OpenDB(path, key); err == nil {
+			t.Fatalf("OpenDB accepted a %d-byte key; must reject non-32", n)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("OpenDB created a file for a rejected %d-byte key", n)
+		}
 	}
 }
 

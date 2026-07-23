@@ -39,6 +39,9 @@ func OpenDB(path string, rawKey []byte) (*sql.DB, error) {
 // has no plaintext fallback for a keyed store. A nil key opens plaintext (the
 // unencrypted dev/global/default engine).
 func openDB(path string, cfg *Config) (*sql.DB, error) {
+	if err := validKeyLen(cfg); err != nil {
+		return nil, err
+	}
 	if cfg.RawKey != nil {
 		return openEnvelope(path, cfg.RawKey)
 	}

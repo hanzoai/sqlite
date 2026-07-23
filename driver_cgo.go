@@ -180,6 +180,9 @@ func OpenDB(path string, rawKey []byte) (*sql.DB, error) {
 //
 // A nil key opens unencrypted (the dev/global/default engine).
 func openDB(path string, cfg *Config) (*sql.DB, error) {
+	if err := validKeyLen(cfg); err != nil {
+		return nil, err
+	}
 	if cfg.RawKey != nil && !CodecLinked() {
 		return openEnvelope(path, cfg.RawKey)
 	}

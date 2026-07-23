@@ -5,11 +5,68 @@ package sqlite
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 )
+
+// TestEnvelopeTempStoreMemoryOnFallback is the P2b confidentiality gate. On the
+// cgo→envelope fallback the plaintext RAM copy is opened by csqlite (mattn), which
+// SILENTLY DROPS `_temp_store=MEMORY` from a DSN. Without a real per-connection
+// PRAGMA, SQLite would default temp_store=FILE and spill DECRYPTED temp b-trees
+// (large ORDER BY, TEMP TABLE) to persistent disk — plaintext at rest on the exact
+// safety-fallback path. This forces the fallback and asserts (a) temp_store is
+// MEMORY on the connection, and (b) a temp-using workload leaves no file in a
+// watched SQLITE_TMPDIR.
+func TestEnvelopeTempStoreMemoryOnFallback(t *testing.T) {
+	skipIfNoEnvelopeScratch(t)
+	atomic.StoreInt32(&probeOverride, 2) // force the cgo→envelope fallback (csqlite temp)
+	defer atomic.StoreInt32(&probeOverride, 0)
+
+	watch := t.TempDir()
+	t.Setenv("SQLITE_TMPDIR", watch) // where C SQLite would put a temp-file spill
+
+	key := make([]byte, 32)
+	db, err := OpenDB(filepath.Join(t.TempDir(), "ts.db"), key)
+	if err != nil {
+		t.Fatalf("OpenDB (fallback): %v", err)
+	}
+	defer db.Close()
+
+	var ts int
+	if err := db.QueryRow("PRAGMA temp_store").Scan(&ts); err != nil {
+		t.Fatalf("read temp_store: %v", err)
+	}
+	if ts != 2 {
+		t.Fatalf("temp_store = %d, want 2 (MEMORY) — mattn dropped the DSN pragma; decrypted temp b-trees could spill to disk", ts)
+	}
+
+	// Exercise temp storage; with temp_store=MEMORY it must stay in RAM.
+	if _, err := db.Exec(`CREATE TABLE base (v TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 800; i++ {
+		if _, err := db.Exec(`INSERT INTO base VALUES (?)`, fmt.Sprintf("row-%08d-%d", 800-i, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`CREATE TEMP TABLE sorted AS SELECT v FROM base ORDER BY v`); err != nil {
+		t.Fatalf("temp table sort: %v", err)
+	}
+	if _, err := db.Exec(`SELECT count(*) FROM (SELECT v FROM base GROUP BY v ORDER BY v DESC)`); err != nil {
+		t.Fatalf("group/order: %v", err)
+	}
+
+	ents, err := os.ReadDir(watch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 0 {
+		t.Fatalf("temp spilled to disk despite temp_store=MEMORY (plaintext leak): %v", ents)
+	}
+}
 
 // dbHandle is satisfied by both *DB (from Open, which embeds *sql.DB) and *sql.DB
 // (from OpenDB), so one test body covers both keyed entry points.

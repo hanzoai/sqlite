@@ -83,8 +83,17 @@ type Config struct {
 // Option configures a database.
 type Option func(*Config)
 
-// WithKey derives a raw 256-bit key from a passphrase via SHA-256
-// and configures sqlcipher to use it directly (skipping KDF).
+// WithKey derives the raw 256-bit page key from a passphrase with a SINGLE,
+// UNSALTED SHA-256 — NOT a slow, salted KDF. It is therefore safe ONLY for a
+// high-entropy passphrase (e.g. a base64-encoded random secret); a human-memorable
+// passphrase is brute-forceable because there is no PBKDF2 stretching and no salt.
+//
+// A slow KDF is deliberately not applied here: the SQLCipher raw-key form takes the
+// 32 bytes directly, and the file salt (which would seed a KDF) is not known when an
+// Option is constructed. Production keys come from KMS already uniformly random —
+// use WithRawKey / OpenDB(path, key) with those. For a low-entropy passphrase,
+// derive a key out of band with a salted KDF (argon2id / PBKDF2) and pass it via
+// WithRawKey.
 func WithKey(passphrase string) Option {
 	return func(c *Config) {
 		h := sha256.Sum256([]byte(passphrase))
@@ -145,6 +154,18 @@ func (db *DB) Encrypted() bool {
 	return db.config.RawKey != nil
 }
 
+// validKeyLen rejects a non-32-byte encryption key. It is enforced at the openDB
+// funnel so BOTH the live-libsqlcipher path and the envelope path reject a wrong
+// length: on the live path a non-32-byte `key=x'HEX'` URI blob would otherwise be
+// reinterpreted by SQLCipher as a passphrase (a silent, different key), and OpenDB
+// (unlike Open) applied no length check of its own.
+func validKeyLen(cfg *Config) error {
+	if cfg.RawKey != nil && len(cfg.RawKey) != 32 {
+		return fmt.Errorf("sqlite: encryption key must be 32 bytes, got %d", len(cfg.RawKey))
+	}
+	return nil
+}
+
 // Open opens an at-rest-encrypted (when keyed), optionally distributed SQLite
 // database. Passing an encryption key (WithKey/WithRawKey/WithPrincipalKey) always
 // encrypts, on every build: the SQLCipher codec (live libsqlcipher when linked,
@@ -158,14 +179,9 @@ func Open(path string, opts ...Option) (*DB, error) {
 	if cfg.derivationErr != nil {
 		return nil, cfg.derivationErr
 	}
-	if cfg.RawKey != nil {
-		if n := len(cfg.RawKey); n != 32 {
-			return nil, fmt.Errorf("sqlite: encryption key must be 32 bytes, got %d", n)
-		}
-	}
-
-	// openDB is the single keyed-open funnel (both Open and OpenDB pass through it);
-	// a key always routes to the SQLCipher codec, never to a plaintext write.
+	// openDB is the single keyed-open funnel (both Open and OpenDB pass through it):
+	// it validates the key length and routes a key to the SQLCipher codec, never to
+	// a plaintext write.
 	db, err := openDB(path, &cfg)
 	if err != nil {
 		return nil, err
