@@ -1,6 +1,6 @@
 module github.com/hanzoai/sqlite
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/hanzoai/csqlite v0.1.0
