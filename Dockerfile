@@ -1,6 +1,6 @@
 # hanzoai/sqlite — distributed encrypted SQLite
 # CGO required for go-sqlite3 + sqlcipher
-FROM golang:1.26.4-bookworm AS builder
+FROM golang:1.26.5-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlcipher-dev gcc libc6-dev pkg-config \
