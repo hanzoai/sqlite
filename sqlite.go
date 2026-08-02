@@ -76,8 +76,6 @@ type Config struct {
 	Parties    int                // n value (total parties)
 	SigningKey ed25519.PrivateKey // this node's signing key
 
-	// Internal: set by WithPrincipalKey if derivation fails.
-	derivationErr error
 }
 
 // Option configures a database.
@@ -167,7 +165,7 @@ func validKeyLen(cfg *Config) error {
 }
 
 // Open opens an at-rest-encrypted (when keyed), optionally distributed SQLite
-// database. Passing an encryption key (WithKey/WithRawKey/WithPrincipalKey) always
+// database. Passing an encryption key (WithKey/WithRawKey) always
 // encrypts, on every build: the SQLCipher codec (live libsqlcipher when linked,
 // otherwise the pure-Go codec envelope) keys the file. It never writes a keyed
 // store as plaintext.
@@ -175,9 +173,6 @@ func Open(path string, opts ...Option) (*DB, error) {
 	cfg := Config{Mode: ModeSingle}
 	for _, o := range opts {
 		o(&cfg)
-	}
-	if cfg.derivationErr != nil {
-		return nil, cfg.derivationErr
 	}
 	// openDB is the single keyed-open funnel (both Open and OpenDB pass through it):
 	// it validates the key length and routes a key to the SQLCipher codec, never to
