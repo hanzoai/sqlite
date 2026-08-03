@@ -215,6 +215,25 @@ func DSN(path string, rawKey []byte) string {
 		"_journal_mode=WAL",
 		"_synchronous=NORMAL",
 		"_foreign_keys=ON",
+		// Every transaction takes the RESERVED lock at BEGIN rather than
+		// upgrading to it on its first write.
+		//
+		// A keyed store is single-writer — one pool, MaxOpenConns(1) — but that
+		// serializes writers inside ONE process and says nothing about a second
+		// one. Two processes hold the same file during any rolling upgrade of a
+		// PVC-backed service, and under a deferred BEGIN both enter a
+		// transaction, both read, and the second one's write is refused with
+		// SQLITE_BUSY_SNAPSHOT rather than committed from its stale read.
+		//
+		// SQLite therefore does not corrupt; it drops the write and returns an
+		// error, which is only as safe as the handler. A read-modify-write whose
+		// caller treats a transaction error as a transient fault (hanzoai/iam's
+		// failed-login counter does exactly that) silently does not advance.
+		//
+		// Immediate makes the second writer block at BEGIN instead, so it does
+		// not read until the first has committed. It costs nothing where there
+		// is only one writer, which is the case this DSN is built for.
+		"_txlock=immediate",
 	}
 	if rawKey != nil {
 		// SQLCipher raw-key blob literal: x'..' => no passphrase KDF. Hex is
