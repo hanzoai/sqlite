@@ -94,4 +94,4 @@ storage, multi-sig). Pure Go; available under both backends.
 
 ## License
 
-Apache-2.0
+MIT OR Apache-2.0, at your option — per [HIP-0137](https://github.com/hanzoai/hips/blob/main/HIPs/hip-0137-one-license.md).
