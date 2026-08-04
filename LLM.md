@@ -173,3 +173,16 @@ module (mattn → hanzoai/csqlite), a dependency-graph change, so not a patch.
 - v0.1.4 — `WrapDEK`/`UnwrapDEK` take a principal-binding GCM `aad` + add
   `PrincipalAAD` (defense-in-depth). Dockerfile fixed to link the codec and
   self-assert via `SQLITE_REQUIRE_CODEC=1` (was inert-tag CI-theater).
+
+## Licensing
+
+`MIT OR Apache-2.0`, at your option — per HIP-0137 (`hanzoai/hips`, `HIPs/hip-0137-one-license.md`). Relicensed from BSD-3-Clause,
+which HIP-0137 puts out of scope for `hanzoai`.
+
+Scope is **this branch's tree only**. This package is a driver *shim*: the
+SQLite amalgamation and the cgo bindings live in their own upstreams
+(`hanzoai/csqlite`, `modernc.org/sqlite`) under their own licences and are not
+vendored here — which is what makes the relicense clean. Non-default branches
+that *do* vendor generated `internal/` sources carrying third-party headers are
+outside this change; the `LICENSE` files here speak for the tree they sit in and
+make no claim over those.
