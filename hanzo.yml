@@ -1,0 +1,22 @@
+# hanzoai/sqlite — the Go SQLite driver (cgo amalgamation + SQLCipher envelope).
+# A library: it ships from a tag as a Go module, builds no image, deploys
+# nowhere. Gate only.
+#
+# BOTH BUILD TAGS, because this driver has two implementations and a repo that
+# only compiled one of them would ship the other broken. driver_cgo.go and
+# driver_nocgo.go (and the errcodes/hooks/pragma/filecontrol pairs beside them)
+# are selected by cgo, so `go build ./...` alone exercises exactly half the
+# tree. The C toolchain for the cgo half is provisioned by hanzoai/ci whenever
+# go.mod is present.
+#
+# encryption_proof_test.go is the load-bearing suite: it asserts an encrypted
+# file's bytes are not readable plaintext. That is the whole promise of the
+# envelope, and it fails silently — a database that was never encrypted opens
+# and queries perfectly.
+test:
+  - name: build-and-test
+    run: |
+      set -e
+      CGO_ENABLED=1 go build ./...
+      CGO_ENABLED=0 go build ./...
+      CGO_ENABLED=1 go test -count=1 ./...
