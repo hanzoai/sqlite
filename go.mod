@@ -3,7 +3,7 @@ module github.com/hanzoai/sqlite
 go 1.26.5
 
 require (
-	github.com/hanzoai/csqlite v0.1.0
+	github.com/hanzoai/csqlite v0.1.2
 	github.com/hanzoai/sqlcipher v0.1.1
 	github.com/luxfi/crypto v1.20.2
 	golang.org/x/crypto v0.54.0
