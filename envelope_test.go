@@ -176,16 +176,8 @@ func TestEnvelopeFailsClosedWithoutRAMFS(t *testing.T) {
 	}
 }
 
-// TestRefusalNamesTheRemedy proves the refusal TEACHES. Failing closed is the
-// safety property (above); saying why and what to do about it is what keeps the
-// property from reading as "your platform is unsupported".
-//
-// The old text named /dev/shm and the env var, on a machine that has neither and
-// cannot make the second without a mount — true, and useless in the same breath.
-// The obvious next guess is an hdiutil RAM disk, which really is memory-backed and
-// which this package correctly refuses, so the guess costs a detour and lands back
-// where it started. macOS ships tmpfs; one mount was the whole answer, and nothing
-// the operator could see said so.
+// TestRefusalNamesTheRemedy: failing closed is the safety property; naming the fix
+// is what stops it reading as "your platform is unsupported".
 func TestRefusalNamesTheRemedy(t *testing.T) {
 	if CodecLinked() {
 		t.Skip("live libsqlcipher codec needs no RAM-backed scratch")
@@ -209,9 +201,8 @@ func TestRefusalNamesTheRemedy(t *testing.T) {
 	}
 }
 
-// assertHint fails unless err carries this platform's road to RAM-backed scratch.
-// It asserts the COMMAND, not prose: a message that says "needs tmpfs" and stops
-// is the exact failure this guards.
+// assertHint requires the COMMAND, not prose. "needs tmpfs" and stop is the failure
+// this guards.
 func assertHint(t *testing.T, err error) {
 	t.Helper()
 	if ramfsHint == "" {
