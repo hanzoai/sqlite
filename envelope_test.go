@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -171,6 +173,56 @@ func TestEnvelopeFailsClosedWithoutRAMFS(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("a fail-closed keyed open created a file at %s", path)
+	}
+}
+
+// TestRefusalNamesTheRemedy proves the refusal TEACHES. Failing closed is the
+// safety property (above); saying why and what to do about it is what keeps the
+// property from reading as "your platform is unsupported".
+//
+// The old text named /dev/shm and the env var, on a machine that has neither and
+// cannot make the second without a mount — true, and useless in the same breath.
+// The obvious next guess is an hdiutil RAM disk, which really is memory-backed and
+// which this package correctly refuses, so the guess costs a detour and lands back
+// where it started. macOS ships tmpfs; one mount was the whole answer, and nothing
+// the operator could see said so.
+func TestRefusalNamesTheRemedy(t *testing.T) {
+	if CodecLinked() {
+		t.Skip("live libsqlcipher codec needs no RAM-backed scratch")
+	}
+	notRAM := filepath.Join(t.TempDir(), "definitely-not-tmpfs")
+
+	// Both roads out of ramfsBase must carry the hint: the override that does not
+	// qualify, and no override at all on a host with no /dev/shm.
+	t.Setenv(ramfsEnv, notRAM)
+	_, err := ramfsBase()
+	if err == nil {
+		t.Fatal("a non-RAM-backed override was accepted")
+	}
+	assertHint(t, err)
+
+	t.Setenv(ramfsEnv, "")
+	if _, err := ramfsBase(); err != nil {
+		// Only assert on hosts that actually lack /dev/shm; where one exists this
+		// path legitimately succeeds and there is nothing to teach.
+		assertHint(t, err)
+	}
+}
+
+// assertHint fails unless err carries this platform's road to RAM-backed scratch.
+// It asserts the COMMAND, not prose: a message that says "needs tmpfs" and stops
+// is the exact failure this guards.
+func assertHint(t *testing.T, err error) {
+	t.Helper()
+	if ramfsHint == "" {
+		return // a platform where this package knows no verified road
+	}
+	want := "mount_tmpfs"
+	if runtime.GOOS == "linux" {
+		want = "/dev/shm"
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("refusal does not name the remedy (%q missing):\n%v", want, err)
 	}
 }
 
