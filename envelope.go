@@ -404,12 +404,8 @@ func refuseHotSidecar(realPath string) error {
 // exposure encryption removes, so a host with no RAM-backed scratch FAILS CLOSED.
 //
 // Order: the HANZO_SQLITE_RAMFS_DIR override (if RAM-backed), then /dev/shm.
-//
-// Both refusals carry ramfsHint — the platform's own road to a RAM-backed dir, in
-// the words the operator types. A refusal that is true and unhelpful in the same
-// breath costs an afternoon: the old text named /dev/shm on a machine that has no
-// /dev/shm, so it read as "your platform is unsupported" when macOS ships tmpfs
-// and one mount away was the whole answer.
+// Both refusals carry ramfsHint so the reader learns how to fix it, not only that
+// it is broken.
 func ramfsBase() (string, error) {
 	if d := os.Getenv(ramfsEnv); d != "" {
 		if isRAMBacked(d) {
