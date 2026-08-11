@@ -187,47 +187,39 @@ that *do* vendor generated `internal/` sources carrying third-party headers are
 outside this change; the `LICENSE` files here speak for the tree they sit in and
 make no claim over those.
 
-## 10,000 attached databases: the limit is a constant, the cost is three things
+## 10,000 attached databases — done, and the cost is memory
 
-An entity group is many small databases queried together — a file per org, per
-project, per user — so the ceiling on `ATTACH` is the ceiling on the whole shape.
-Upstream ships `SQLITE_MAX_ATTACHED 10` and refuses anything above 125.
+An entity group is many small databases queried together, so the ATTACH ceiling
+bounds the whole shape. Upstream refuses above 125 and, with the refusal lifted,
+corrupts the schema at 254. Three byte-widths, no design (hanzoai/csqlite v0.1.3):
 
-**THE 125 IS A `#error`, NOT A STRUCTURE.** Above 30 attachments the mask that
-tracks which databases a statement touches is ALREADY a bit array that grows with
-the constant (`sqlite3-binding.c`, hanzoai/csqlite):
+	#error SQLITE_MAX_ATTACHED>125     a constant, nothing enforced it
+	u8  sqlite3InitInfo.iDb            wrapped at 256 -> int
+	i8  VdbeCursor.iDb                 signed, held 127 -> int
 
-	#if SQLITE_MAX_ATTACHED>30
-	  typedef unsigned char yDbMask[(SQLITE_MAX_ATTACHED+9)/8];
-	# define DbMaskTest(M,I)  (((M)[(I)/8]&(1<<((I)&7)))!=0)
+`yDbMask` is the thing that LOOKS like the limit and never was: above 30
+attachments it is already a bit array sized from the constant, one bit per
+database, 1,251 bytes at ten thousand.
 
-One bit per database — 1,251 bytes at 10,000. The refusal is a separate guard:
+Measured after: 10,000 attached on one connection, values written and read back
+at 0, 127, 128, 255 and 9,999, and a UNION across three of them. The old 254
+failure was "malformed database schema" during a write — worse than a refusal.
 
-	#if SQLITE_MAX_ATTACHED<0 || SQLITE_MAX_ATTACHED>125
-	# error SQLITE_MAX_ATTACHED must be between 0 and 125
+**The cost is memory, and it is what decides a group's size: ~111 KB per attached
+database, so ten thousand is ~1.1 GB on one connection.** The constant never was
+the constraint.
 
-So raising it is one line. Making 10,000 FAST is three specific things, and none
-of them is the bitmask:
+Default builds still cap at 10 and are unchanged; raise with
+`-DSQLITE_MAX_ATTACHED=N`. `csqlite`'s `attach_test.go` skips on a default build
+rather than demanding the flag.
 
-1. **The mask is on the STACK.** `yDbMask` is embedded in `Parse` (btreeMask,
-   cookieMask, writeMask) and `Parse` lives on the stack in recursive paths.
-   4 bytes to 1.25 KB, times several masks, times parse depth. This is the most
-   likely thing to bite and the plausible reason upstream picked a small cap.
-2. **Name resolution is a linear scan.** `sqlite3FindDb` walks `db->aDb` for
-   every schema name. Fine at 10; hot on every statement at 10,000. Wants a hash
-   on the schema name.
-3. **`DbMaskAllZero` walks the array** — O(n/8), called often. Wants a popcount
-   or a dirty count.
+Still open, in the order that matters:
 
-**And the wall that is not the mask at all:** every attached database carries a
-Btree, a pager and a schema cache. Ten thousand of those is real memory per
-CONNECTION however good the masks are. Measure bytes-per-attached-database
-first — that number, not the constant, decides whether an entity group is 10,000
-or 1,000, and it is measurable today at 125 without forking anything.
-
-**Order of work, so nobody starts at the wrong end:** measure memory and stack
-depth at 125 → raise the guard and re-measure → fix the two linear scans →
-benchmark opening a group of N and report both. The C lives in hanzoai/csqlite
-(`sqlite3-binding.c`), which is already our fork; this module is the Go half and
-needs the matching build tag, so both sides move together or the driver silently
-gets a smaller ceiling than the library.
+1. **Per-connection memory** is the real ceiling. 1.1 GB at ten thousand means an
+   entity group is bounded by RAM per connection, not by the constant — so the
+   graph index should resolve WHICH files to open rather than attaching all of
+   them, and handle eviction is the piece nobody has built (`OrgStore` caches
+   open handles with no cap).
+2. **`sqlite3FindDb` is a linear scan** of `db->aDb` per schema name — fine at 10,
+   hot on every statement at ten thousand. Wants a hash.
+3. **`DbMaskAllZero` walks the mask array**, O(n/8), called often.
