@@ -18,6 +18,9 @@ var (
 	codeConstraintUnique     = lib.SQLITE_CONSTRAINT_UNIQUE
 	codeConstraintPrimaryKey = lib.SQLITE_CONSTRAINT_PRIMARYKEY
 	codeConstraintForeignKey = lib.SQLITE_CONSTRAINT_FOREIGNKEY
+
+	// The PRIMARY code every constraint extended code reduces to (SQLITE_CONSTRAINT).
+	codeConstraint = lib.SQLITE_CONSTRAINT
 )
 
 // extendedCode extracts SQLite's extended result code from a modernc error.

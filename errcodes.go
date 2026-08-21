@@ -37,3 +37,22 @@ func IsConstraintForeignKey(err error) bool {
 	c, ok := extendedCode(err)
 	return ok && c == codeConstraintForeignKey
 }
+
+// IsConstraint reports whether err is a constraint violation of ANY kind —
+// UNIQUE, PRIMARY KEY, FOREIGN KEY, CHECK, NOT NULL, TRIGGER and the rest of the
+// family.
+//
+// It is the predicate a caller wants when the remedy is the same whichever
+// constraint failed, and the three specific ones above are not a substitute for
+// it: each matches exactly one extended code, so classifying a NOT NULL
+// violation with IsConstraintUnique answers false and the caller silently stops
+// handling a case it used to handle.
+//
+// The test is SQLite's own: an extended result code carries its primary code in
+// the low eight bits (SQLITE_CONSTRAINT_UNIQUE 2067 & 0xff == SQLITE_CONSTRAINT
+// 19), so masking classifies the whole family without enumerating it — a
+// constraint kind added by a future SQLite is matched by this and by no list.
+func IsConstraint(err error) bool {
+	c, ok := extendedCode(err)
+	return ok && c&0xff == codeConstraint
+}

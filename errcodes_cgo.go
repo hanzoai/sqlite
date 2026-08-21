@@ -16,6 +16,9 @@ var (
 	codeConstraintUnique     = int(sqlite3.ErrConstraintUnique)
 	codeConstraintPrimaryKey = int(sqlite3.ErrConstraintPrimaryKey)
 	codeConstraintForeignKey = int(sqlite3.ErrConstraintForeignKey)
+
+	// The PRIMARY code every constraint extended code reduces to (SQLITE_CONSTRAINT).
+	codeConstraint = int(sqlite3.ErrConstraint)
 )
 
 // extendedCode extracts SQLite's extended result code from a csqlite error.
