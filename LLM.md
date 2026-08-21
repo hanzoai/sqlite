@@ -19,6 +19,14 @@ driver and registers the `sqlite3` driver name; this wrapper registers `sqlite`
 over the same `*csqlite.SQLiteDriver`. The `!cgo` path stays on
 `modernc.org/sqlite` (a different, pure-Go engine — not go-sqlite3).
 
+**Both names resolve on both builds** (v0.5.6+). `sqlite` is the name to write;
+`sqlite3` is an alias registered here to the SAME driver value when the backend
+has not already claimed it, so the two can never become two engines — the test
+writes a database through one name and reads it back through the other. It used
+to resolve only under cgo, where csqlite claims it, and identical source opened
+on a developer machine while answering `unknown driver "sqlite3"` in a
+CGO_ENABLED=0 image. That is closed: a legacy name is style, not a defect.
+
 **`sqlite_purego` opt-out tag:** forces the pure-Go backend even under cgo. Default
 (no tag) is unchanged — cgo → SQLCipher — so encryption consumers are untouched.
 Use it when a binary links this fork AND another package that imports
