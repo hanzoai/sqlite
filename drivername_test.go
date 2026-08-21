@@ -9,23 +9,23 @@ import (
 	_ "github.com/hanzoai/sqlite"
 )
 
-// THE DRIVER NAME IS "sqlite", ON EVERY BUILD.
+// BOTH NAMES OPEN THIS DRIVER, ON EVERY BUILD.
 //
-// This package registers that name under both backends — csqlite against
-// libsqlcipher when cgo is on, modernc.org/sqlite when it is not — so a caller
-// that opens "sqlite" gets a working database whichever way the binary was
-// built, and that is the whole point of the facade.
+// "sqlite" is the name to write. It is registered under both backends — csqlite
+// against libsqlcipher when cgo is on, a pure-Go engine when it is not — so a
+// caller gets a working database whichever way the binary was built, and that is
+// the point of the facade.
 //
-// "sqlite3" is NOT that name, and the difference is invisible until it is
-// expensive. Under cgo, csqlite registers "sqlite3" in its own init for
-// drop-in compatibility with the bindings it forks, so `sql.Open("sqlite3")`
-// works. Without cgo, modernc registers only "sqlite", so the same call fails
-// with `unknown driver "sqlite3"`. A repository that opens the legacy name
-// therefore passes every test on a developer's cgo machine and dies at the
-// first query in a CGO_ENABLED=0 image.
+// "sqlite3" is an alias to the SAME driver value, registered here when the
+// backend has not already claimed it. It used to resolve only under cgo, where
+// csqlite registers it for drop-in compatibility with the bindings it forks;
+// identical source then opened on a developer machine and answered
+// `unknown driver "sqlite3"` in a CGO_ENABLED=0 image. That is closed, so a
+// legacy name is style rather than a defect.
 //
-// These two tests state both halves so the contract is a property of the
-// package rather than something each caller rediscovers.
+// These tests state the contract so it is a property of the package rather than
+// something each caller rediscovers: both names resolve, and they are one engine
+// — a database written through either reads back through the other.
 
 // TestSqliteIsRegisteredOnEveryBuild is the guarantee the facade exists to make.
 func TestSqliteIsRegisteredOnEveryBuild(t *testing.T) {
