@@ -1,3 +1,12 @@
+// Package sqlite speaks SQLite to gorm over github.com/hanzoai/sqlite.
+//
+// It is a fork of gorm.io/driver/sqlite, which blank-imports mattn/go-sqlite3
+// purely to register a driver name. Both that and the facade's cgo backend
+// vendor the SQLite amalgamation, so a binary linking the two fails at the
+// linker under cgo — which is the whole reason this exists.
+//
+// It is a bridge, not a destination: hanzoai/orm is the estate's ORM, and this
+// module retires when nothing imports gorm.
 package sqlite
 
 import (
@@ -28,6 +37,32 @@ type Config struct {
 	Conn gorm.ConnPool
 }
 
+// pragmas is the driver's profile WITHOUT foreign_keys, and that omission is the
+// whole reason this list is spelled out rather than taken from the driver.
+//
+// The migrator alters a column by rebuilding the table — create, copy, DROP the
+// original, rename — which SQLite refuses while a foreign key references it. The
+// migrator's own guard toggles `PRAGMA foreign_keys` on the *sql.DB, but the
+// pragma is per CONNECTION and the rebuild runs in a transaction the pool may
+// serve from a different one. Measured on both backends: DropColumn fails every
+// time, and AlterColumn fails whenever the pool hands the transaction a second
+// connection.
+//
+// Upstream never met this: a bare sql.Open leaves foreign keys off, so the
+// guard's enabled-branch was dead code. Enforcing them here woke it up. A caller
+// that wants them enforced brings its own pool through Conn.
+var pragmas = []driver.Pragma{
+	{Name: "busy_timeout", Value: "10000"},
+	{Name: "journal_mode", Value: "WAL"},
+	{Name: "journal_size_limit", Value: "200000000"},
+	{Name: "synchronous", Value: "NORMAL"},
+	{Name: "temp_store", Value: "MEMORY"},
+	{Name: "cache_size", Value: "-32000"},
+}
+
+// Open addresses dsn. The pragmas above are applied AFTER anything in dsn and
+// therefore win, and there is no field to change them — a caller who needs a
+// different profile builds its own pool and passes it as Conn.
 func Open(dsn string) gorm.Dialector {
 	return &Dialector{DSN: dsn}
 }
@@ -43,12 +78,12 @@ func (dialector Dialector) Name() string {
 func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 	// A caller who brought their own pool has already decided how it opens.
 	// Otherwise open through the driver's own door rather than by driver name:
-	// sql.Open applies no pragmas, so a bare open leaves foreign keys OFF and
-	// takes whichever busy_timeout the linked backend happens to default to.
+	// sql.Open applies no pragmas, so a bare open leaves the database on the
+	// rollback journal and takes whichever busy_timeout the backend defaults to.
 	if dialector.Conn != nil {
 		db.ConnPool = dialector.Conn
 	} else {
-		conn, err := driver.OpenPragma(dialector.DSN, driver.DefaultPragmas)
+		conn, err := driver.OpenPragma(dialector.DSN, pragmas)
 		if err != nil {
 			return err
 		}
