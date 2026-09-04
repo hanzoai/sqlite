@@ -23,7 +23,6 @@ import (
 // the image opens in a pure-Go tool. Under cgo it additionally proves the C
 // library really is SQLCipher rather than a plain SQLite that ignored the key.
 func TestKeyedFileIsOurSQLCipher(t *testing.T) {
-	skipIfNoEnvelopeScratch(t)
 
 	const marker = "sqlcipher-format-canary-1d4e"
 	key := make([]byte, 32)

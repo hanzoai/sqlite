@@ -21,7 +21,6 @@ import (
 // MEMORY on the connection, and (b) a temp-using workload leaves no file in a
 // watched SQLITE_TMPDIR.
 func TestEnvelopeTempStoreMemoryOnFallback(t *testing.T) {
-	skipIfNoEnvelopeScratch(t)
 	atomic.StoreInt32(&probeOverride, 2) // force the cgo→envelope fallback (csqlite temp)
 	defer atomic.StoreInt32(&probeOverride, 0)
 
@@ -85,7 +84,6 @@ type dbHandle interface {
 // It exercises BOTH Open and OpenDB (the entry cek uses): both must produce
 // ciphertext on disk that round-trips under the key.
 func TestBrokenLibsqlcipherFallsBackToEnvelope(t *testing.T) {
-	skipIfNoEnvelopeScratch(t)
 	atomic.StoreInt32(&probeOverride, 2) // 2 = force "C codec broken"
 	defer atomic.StoreInt32(&probeOverride, 0)
 
@@ -160,7 +158,6 @@ func TestEnvelopeByteCompatWithLibsqlcipher(t *testing.T) {
 	if !CodecLinked() {
 		t.Skip("no live libsqlcipher in this build; cannot cross-check the two mechanisms")
 	}
-	skipIfNoEnvelopeScratch(t)
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i*7 + 2)

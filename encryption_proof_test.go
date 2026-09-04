@@ -16,7 +16,6 @@ import (
 // keyed reopen must read the row back, and a wrong key must be rejected. A build
 // that would ship plaintext can never pass this.
 func TestEncryptionProof(t *testing.T) {
-	skipIfNoEnvelopeScratch(t)
 
 	const marker = "anti-plaintext-canary-7f3a"
 	key := make([]byte, 32)
@@ -79,20 +78,6 @@ func TestEncryptionProof(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("ENCRYPTION FAILURE: wrong key read succeeded — key is not enforced")
-	}
-}
-
-// skipIfNoEnvelopeScratch skips a test that would exercise the pure-Go codec
-// envelope on a host with no RAM-backed scratch dir (the envelope fails closed
-// there rather than decrypt to disk). When the live libsqlcipher codec is linked
-// (CodecLinked), the envelope is not used and no scratch is needed.
-func skipIfNoEnvelopeScratch(t *testing.T) {
-	t.Helper()
-	if CodecLinked() {
-		return
-	}
-	if _, err := ramfsBase(); err != nil {
-		t.Skipf("pure-Go codec envelope needs RAM-backed scratch (tmpfs): %v", err)
 	}
 }
 

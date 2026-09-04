@@ -11,8 +11,9 @@ package sqlite
 // file: hanzoai/sqlcipher reads and writes the exact SQLCipher 4 page format, in
 // both directions, verified against the C library. The envelope uses that:
 //
-//	Open : DECRYPT the on-disk SQLCipher file to a plaintext copy in RAM (tmpfs),
-//	       or, for a new database, seed the RAM copy with sqlcipher.EmptyPlaintext.
+//	Open : DECRYPT the on-disk SQLCipher file to a plaintext copy in scratch (RAM
+//	       when it is freely available, else the OS temp dir — see scratchBase),
+//	       or, for a new database, seed the copy with sqlcipher.EmptyPlaintext.
 //	       The database/sql engine (modernc on pure-Go, csqlite on cgo) opens that
 //	       plaintext copy — it never sees a key, and honours the 80-byte reserve the
 //	       seed/decrypt carries in the header, so every page it writes leaves room
@@ -27,9 +28,11 @@ package sqlite
 // PROPERTIES AND LIMITS (read before relying on it in a new place):
 //
 //   - CONFIDENTIALITY AT REST: the real path holds only SQLCipher ciphertext. The
-//     decrypted copy lives on a RAM-backed filesystem (tmpfs/ramfs) and is shredded
-//     on close; if no RAM-backed scratch dir exists the open FAILS CLOSED rather
-//     than decrypt to persistent storage (ramfsBase).
+//     decrypted copy lives in scratch — RAM-backed when RAM is freely available,
+//     else the OS temp dir — and is shredded on close (scratchBase). The live
+//     libsqlcipher codec (CodecLinked) needs no scratch at all and is the path a
+//     deployment that must keep plaintext off disk unconditionally should link
+//     (SQLITE_REQUIRE_CODEC=1).
 //   - DURABILITY is at Close (and at Checkpoint): writes reach the encrypted file
 //     when the handle is checkpointed or closed, not per-commit. A crash loses
 //     writes since the last checkpoint/close (the encrypted file keeps its last
@@ -37,7 +40,8 @@ package sqlite
 //   - SINGLE WRITER per file: the plaintext copy is private to this handle, so two
 //     concurrent envelope opens of the same path do not see each other's writes
 //     (last close wins). The intended use is one writer per file (HIP-0302).
-//   - The caller MUST Close the handle; otherwise the RAM copy lingers until reboot.
+//   - The caller MUST Close the handle; otherwise the scratch copy lingers (until
+//     reboot on a RAM mount, until OS temp cleanup otherwise).
 
 import (
 	"context"
@@ -53,41 +57,16 @@ import (
 	"github.com/hanzoai/sqlcipher"
 )
 
-// ramfsEnv is an optional operator override naming a RAM-backed directory for the
-// transient plaintext copy (e.g. a Kubernetes emptyDir{medium:Memory} mount). When
-// unset, /dev/shm is used. It is never a switch that disables encryption — only a
-// choice of which RAM-backed mount to decrypt into.
+// ramfsEnv optionally names a RAM-backed directory for the transient plaintext
+// copy (e.g. a Kubernetes emptyDir{medium:Memory} mount), for an operator who
+// wants to pin where scratch lives. It is a preference, not a requirement, and
+// never a switch that disables encryption.
 const ramfsEnv = "HANZO_SQLITE_RAMFS_DIR"
-
-// insecureDevEnv and its alias let a developer or a test run decrypt into
-// ordinary scratch when no RAM-backed mount is available — the case on a macOS
-// workstation, where mounting tmpfs needs root. It trades the at-rest guarantee
-// (the plaintext copy touches a persistent volume, though it is still shredded
-// on close) for not needing sudo, so it is off by default and named for what it
-// costs. Production leaves it unset and keeps failing closed.
-const (
-	insecureDevEnv = "HANZO_SQLITE_INSECURE_DEV"
-	devEnv         = "HANZO_DEV"
-)
-
-// insecureDevScratch reports the scratch directory to use when the caller has
-// opted out of the RAM-backed requirement, and whether it did. The directory is
-// HANZO_SQLITE_RAMFS_DIR when set, else the OS temp dir, so the opt-out needs no
-// second variable.
-func insecureDevScratch() (string, bool) {
-	if os.Getenv(insecureDevEnv) != "1" && os.Getenv(devEnv) != "1" {
-		return "", false
-	}
-	if d := os.Getenv(ramfsEnv); d != "" {
-		return d, true
-	}
-	return os.TempDir(), true
-}
 
 // envelope holds the state binding one open plaintext copy to its encrypted file.
 type envelope struct {
 	realPath  string // the on-disk SQLCipher (ciphertext) file
-	tmpDir    string // the RAM-backed dir holding the plaintext copy (RemoveAll on shred)
+	tmpDir    string // scratch dir holding the plaintext copy (RemoveAll on shred)
 	plainPath string // the decrypted plaintext database (tmpDir/db)
 	salt      []byte // the file's 16-byte SQLCipher salt (existing file's, or fresh)
 	key       []byte // the 32-byte page key (DEK); zeroed on shred
@@ -110,11 +89,7 @@ func openEnvelope(realPath string, key []byte) (*sql.DB, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("sqlite: envelope key must be 32 bytes, got %d", len(key))
 	}
-	base, err := ramfsBase()
-	if err != nil {
-		return nil, err
-	}
-	tmpDir, err := os.MkdirTemp(base, "hanzo-sqlite-plain-")
+	tmpDir, err := os.MkdirTemp(scratchBase(), "hanzo-sqlite-plain-")
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: envelope scratch dir: %w", err)
 	}
@@ -423,28 +398,25 @@ func refuseHotSidecar(realPath string) error {
 	return nil
 }
 
-// ramfsBase returns a RAM-backed directory to hold the transient plaintext copy, or
-// an error if none is available. It NEVER falls back to on-disk storage:
-// materialising a decrypted database on a persistent volume is exactly the at-rest
-// exposure encryption removes, so a host with no RAM-backed scratch FAILS CLOSED.
+// scratchBase returns a directory to hold the transient plaintext copy. It PREFERS
+// RAM-backed scratch, so the decrypted database stays out of persistent storage
+// wherever that is freely available — an operator's HANZO_SQLITE_RAMFS_DIR if it
+// is RAM-backed, then /dev/shm. Where neither exists (a macOS workstation, a
+// container with no /dev/shm) it falls back to the OS temp dir: the copy is
+// shredded on close either way, and needing root to mount tmpfs is not a price a
+// dev machine or a test run should pay.
 //
-// Order: the HANZO_SQLITE_INSECURE_DEV opt-out (see insecureDevScratch), then the
-// HANZO_SQLITE_RAMFS_DIR override (if RAM-backed), then /dev/shm.
-// Both refusals carry ramfsHint so the reader learns how to fix it, not only that
-// it is broken.
-func ramfsBase() (string, error) {
-	if d, ok := insecureDevScratch(); ok {
-		return d, nil
+// The real at-rest guarantee is the live libsqlcipher codec (CodecLinked), which
+// encrypts pages in place and never materialises plaintext at all; a build that
+// requires it sets SQLITE_REQUIRE_CODEC=1. This envelope is the pure-Go build's
+// road to encryption without a C toolchain, and its scratch stays in RAM when RAM
+// is there for free.
+func scratchBase() string {
+	if d := os.Getenv(ramfsEnv); d != "" && isRAMBacked(d) {
+		return d
 	}
-	if d := os.Getenv(ramfsEnv); d != "" {
-		if isRAMBacked(d) {
-			return d, nil
-		}
-		return "", fmt.Errorf("sqlite: %s=%q is not RAM-backed (tmpfs/ramfs); refusing to decrypt to persistent storage%s", ramfsEnv, d, ramfsHint)
+	if isRAMBacked("/dev/shm") {
+		return "/dev/shm"
 	}
-	const shm = "/dev/shm"
-	if isRAMBacked(shm) {
-		return shm, nil
-	}
-	return "", fmt.Errorf("sqlite: no RAM-backed scratch for the pure-Go SQLCipher codec (need tmpfs at /dev/shm or %s); refusing to decrypt to persistent storage%s", ramfsEnv, ramfsHint)
+	return os.TempDir()
 }

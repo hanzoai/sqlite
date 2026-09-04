@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -15,7 +13,6 @@ import (
 // read everything back. The real path must be ciphertext AFTER the checkpoint and
 // AFTER close — never plaintext at any point a reader could observe it.
 func TestKeyedRoundTripAndCheckpoint(t *testing.T) {
-	skipIfNoEnvelopeScratch(t)
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i*13 + 7)
@@ -80,7 +77,6 @@ func TestKeyedTempStoreMemory(t *testing.T) {
 	if CodecLinked() {
 		t.Skip("live libsqlcipher codec encrypts its own temp spills; temp_store is not the guard there")
 	}
-	skipIfNoEnvelopeScratch(t)
 	key := make([]byte, 32)
 	db, err := OpenDB(filepath.Join(t.TempDir(), "ts.db"), key)
 	if err != nil {
@@ -99,7 +95,6 @@ func TestKeyedTempStoreMemory(t *testing.T) {
 // TestKeyedWrongKeyRejected proves a wrong key never yields data: the envelope
 // fails at DecryptFile (page-1 authentication), the live codec at the query.
 func TestKeyedWrongKeyRejected(t *testing.T) {
-	skipIfNoEnvelopeScratch(t)
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
@@ -154,97 +149,51 @@ func TestOpenDBRejectsWrongKeyLength(t *testing.T) {
 	}
 }
 
-// TestEnvelopeFailsClosedWithoutRAMFS proves the confidentiality-critical property:
-// when the pure-Go codec envelope cannot get RAM-backed scratch, a keyed open FAILS
-// CLOSED and writes NO file — it never decrypts to persistent storage. (The live
-// libsqlcipher codec needs no scratch, so this is an envelope-only property.)
-func TestEnvelopeFailsClosedWithoutRAMFS(t *testing.T) {
+// TestEnvelopeOpensWithoutRAMBackedScratch proves the pure-Go envelope needs no
+// tmpfs and no root: on a host with no RAM-backed scratch a keyed open succeeds
+// through the OS temp dir, round-trips, writes only ciphertext to the real path,
+// and leaves no plaintext behind once closed. (The live libsqlcipher codec needs
+// no scratch at all, so this is an envelope-only path.)
+func TestEnvelopeOpensWithoutRAMBackedScratch(t *testing.T) {
 	if CodecLinked() {
-		t.Skip("live libsqlcipher codec needs no RAM-backed scratch")
+		t.Skip("live libsqlcipher codec needs no scratch")
 	}
-	// Point the resolver at a path that is not RAM-backed (does not exist ⇒ statfs
-	// fails ⇒ isRAMBacked false), so ramfsBase must refuse.
+	// No RAM-backed scratch anywhere: an override that is not tmpfs and does not
+	// exist, and /dev/shm absent on this platform. scratchBase must fall back to the
+	// OS temp dir rather than refuse.
 	t.Setenv(ramfsEnv, filepath.Join(t.TempDir(), "definitely-not-tmpfs"))
 
 	key := make([]byte, 32)
-	path := filepath.Join(t.TempDir(), "fc.db")
-	if _, err := OpenDB(path, key); err == nil {
-		t.Fatal("keyed open succeeded with no RAM-backed scratch — it must fail closed")
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("a fail-closed keyed open created a file at %s", path)
-	}
-}
+	path := filepath.Join(t.TempDir(), "nofs.db")
 
-// TestInsecureDevOptOutOpensWithoutRAMFS proves the escape hatch: with
-// HANZO_DEV=1 a keyed open succeeds on a host with no RAM-backed scratch, so a
-// developer or a test run needs no root to mount tmpfs. The default (no opt-out)
-// still fails closed — TestEnvelopeFailsClosedWithoutRAMFS holds that line.
-func TestInsecureDevOptOutOpensWithoutRAMFS(t *testing.T) {
-	if CodecLinked() {
-		t.Skip("live libsqlcipher codec needs no RAM-backed scratch")
-	}
-	// No RAM-backed dir anywhere: the override is a path that is not tmpfs and does
-	// not exist, and /dev/shm is absent on this platform too. Only the opt-out can
-	// make the open succeed.
-	t.Setenv(ramfsEnv, "")
-	t.Setenv(devEnv, "1")
-
-	base, ok := insecureDevScratch()
-	if !ok || base == "" {
-		t.Fatalf("insecureDevScratch off or empty under HANZO_DEV=1: %q ok=%v", base, ok)
-	}
-
-	key := make([]byte, 32)
-	path := filepath.Join(t.TempDir(), "dev.db")
 	db, err := OpenDB(path, key)
 	if err != nil {
-		t.Fatalf("keyed open under the opt-out failed: %v", err)
+		t.Fatalf("keyed open with no RAM scratch must succeed via temp fallback: %v", err)
 	}
-	db.Close()
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("the encrypted file was not written at %s: %v", path, err)
+	const marker = "envelope-no-ramfs-marker"
+	if _, err := db.Exec(`CREATE TABLE t(v TEXT)`); err != nil {
+		t.Fatalf("create: %v", err)
 	}
-}
+	if _, err := db.Exec(`INSERT INTO t VALUES(?)`, marker); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 
-// TestRefusalNamesTheRemedy: failing closed is the safety property; naming the fix
-// is what stops it reading as "your platform is unsupported".
-func TestRefusalNamesTheRemedy(t *testing.T) {
-	if CodecLinked() {
-		t.Skip("live libsqlcipher codec needs no RAM-backed scratch")
+	// The real path is ciphertext, and reopening with the key reads the row back.
+	assertCiphertextOnDisk(t, path, marker)
+	db2, err := OpenDB(path, key)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
 	}
-	notRAM := filepath.Join(t.TempDir(), "definitely-not-tmpfs")
-
-	// Both roads out of ramfsBase must carry the hint: the override that does not
-	// qualify, and no override at all on a host with no /dev/shm.
-	t.Setenv(ramfsEnv, notRAM)
-	_, err := ramfsBase()
-	if err == nil {
-		t.Fatal("a non-RAM-backed override was accepted")
+	defer db2.Close()
+	var got string
+	if err := db2.QueryRow(`SELECT v FROM t`).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
 	}
-	assertHint(t, err)
-
-	t.Setenv(ramfsEnv, "")
-	if _, err := ramfsBase(); err != nil {
-		// Only assert on hosts that actually lack /dev/shm; where one exists this
-		// path legitimately succeeds and there is nothing to teach.
-		assertHint(t, err)
-	}
-}
-
-// assertHint requires the COMMAND, not prose. "needs tmpfs" and stop is the failure
-// this guards.
-func assertHint(t *testing.T, err error) {
-	t.Helper()
-	if ramfsHint == "" {
-		return // a platform where this package knows no verified road
-	}
-	want := "mount_tmpfs"
-	if runtime.GOOS == "linux" {
-		want = "/dev/shm"
-	}
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("refusal does not name the remedy (%q missing):\n%v", want, err)
+	if got != marker {
+		t.Fatalf("round-trip lost the row: got %q want %q", got, marker)
 	}
 }
 
