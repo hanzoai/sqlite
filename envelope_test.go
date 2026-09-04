@@ -176,6 +176,37 @@ func TestEnvelopeFailsClosedWithoutRAMFS(t *testing.T) {
 	}
 }
 
+// TestInsecureDevOptOutOpensWithoutRAMFS proves the escape hatch: with
+// HANZO_DEV=1 a keyed open succeeds on a host with no RAM-backed scratch, so a
+// developer or a test run needs no root to mount tmpfs. The default (no opt-out)
+// still fails closed — TestEnvelopeFailsClosedWithoutRAMFS holds that line.
+func TestInsecureDevOptOutOpensWithoutRAMFS(t *testing.T) {
+	if CodecLinked() {
+		t.Skip("live libsqlcipher codec needs no RAM-backed scratch")
+	}
+	// No RAM-backed dir anywhere: the override is a path that is not tmpfs and does
+	// not exist, and /dev/shm is absent on this platform too. Only the opt-out can
+	// make the open succeed.
+	t.Setenv(ramfsEnv, "")
+	t.Setenv(devEnv, "1")
+
+	base, ok := insecureDevScratch()
+	if !ok || base == "" {
+		t.Fatalf("insecureDevScratch off or empty under HANZO_DEV=1: %q ok=%v", base, ok)
+	}
+
+	key := make([]byte, 32)
+	path := filepath.Join(t.TempDir(), "dev.db")
+	db, err := OpenDB(path, key)
+	if err != nil {
+		t.Fatalf("keyed open under the opt-out failed: %v", err)
+	}
+	db.Close()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the encrypted file was not written at %s: %v", path, err)
+	}
+}
+
 // TestRefusalNamesTheRemedy: failing closed is the safety property; naming the fix
 // is what stops it reading as "your platform is unsupported".
 func TestRefusalNamesTheRemedy(t *testing.T) {

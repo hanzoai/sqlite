@@ -59,6 +59,31 @@ import (
 // choice of which RAM-backed mount to decrypt into.
 const ramfsEnv = "HANZO_SQLITE_RAMFS_DIR"
 
+// insecureDevEnv and its alias let a developer or a test run decrypt into
+// ordinary scratch when no RAM-backed mount is available — the case on a macOS
+// workstation, where mounting tmpfs needs root. It trades the at-rest guarantee
+// (the plaintext copy touches a persistent volume, though it is still shredded
+// on close) for not needing sudo, so it is off by default and named for what it
+// costs. Production leaves it unset and keeps failing closed.
+const (
+	insecureDevEnv = "HANZO_SQLITE_INSECURE_DEV"
+	devEnv         = "HANZO_DEV"
+)
+
+// insecureDevScratch reports the scratch directory to use when the caller has
+// opted out of the RAM-backed requirement, and whether it did. The directory is
+// HANZO_SQLITE_RAMFS_DIR when set, else the OS temp dir, so the opt-out needs no
+// second variable.
+func insecureDevScratch() (string, bool) {
+	if os.Getenv(insecureDevEnv) != "1" && os.Getenv(devEnv) != "1" {
+		return "", false
+	}
+	if d := os.Getenv(ramfsEnv); d != "" {
+		return d, true
+	}
+	return os.TempDir(), true
+}
+
 // envelope holds the state binding one open plaintext copy to its encrypted file.
 type envelope struct {
 	realPath  string // the on-disk SQLCipher (ciphertext) file
@@ -403,10 +428,14 @@ func refuseHotSidecar(realPath string) error {
 // materialising a decrypted database on a persistent volume is exactly the at-rest
 // exposure encryption removes, so a host with no RAM-backed scratch FAILS CLOSED.
 //
-// Order: the HANZO_SQLITE_RAMFS_DIR override (if RAM-backed), then /dev/shm.
+// Order: the HANZO_SQLITE_INSECURE_DEV opt-out (see insecureDevScratch), then the
+// HANZO_SQLITE_RAMFS_DIR override (if RAM-backed), then /dev/shm.
 // Both refusals carry ramfsHint so the reader learns how to fix it, not only that
 // it is broken.
 func ramfsBase() (string, error) {
+	if d, ok := insecureDevScratch(); ok {
+		return d, nil
+	}
 	if d := os.Getenv(ramfsEnv); d != "" {
 		if isRAMBacked(d) {
 			return d, nil
