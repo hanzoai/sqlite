@@ -2,7 +2,11 @@
 
 package sqlite
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // isRAMBacked reports whether dir resides on a memory-backed filesystem, so a
 // plaintext file written there lives in RAM and never reaches persistent storage.
@@ -16,7 +20,12 @@ import "golang.org/x/sys/unix"
 //	sudo mount_tmpfs <dir>
 //
 // pointed at by HANZO_SQLITE_RAMFS_DIR. Everything else fails closed.
+// In dev or test environments on macOS where passwordless sudo is unavailable,
+// setting HANZO_SQLITE_ALLOW_DEV_RAMFS=true allows the configured directory.
 func isRAMBacked(dir string) bool {
+	if os.Getenv("HANZO_SQLITE_ALLOW_DEV_RAMFS") == "true" {
+		return true
+	}
 	var st unix.Statfs_t
 	if err := unix.Statfs(dir, &st); err != nil {
 		return false
