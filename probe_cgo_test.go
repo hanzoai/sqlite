@@ -46,7 +46,7 @@ func TestEnvelopeTempStoreMemoryOnFallback(t *testing.T) {
 	if _, err := db.Exec(`CREATE TABLE base (v TEXT)`); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 800; i++ {
+	for i := range 800 {
 		if _, err := db.Exec(`INSERT INTO base VALUES (?)`, fmt.Sprintf("row-%08d-%d", 800-i, i)); err != nil {
 			t.Fatal(err)
 		}

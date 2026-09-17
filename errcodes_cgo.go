@@ -24,8 +24,7 @@ var (
 // extendedCode extracts SQLite's extended result code from a csqlite error.
 // sqlite3.Error is a VALUE type, so errors.As targets a value, not a pointer.
 func extendedCode(err error) (int, bool) {
-	var e sqlite3.Error
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[sqlite3.Error](err); ok {
 		return int(e.ExtendedCode), true
 	}
 	return 0, false

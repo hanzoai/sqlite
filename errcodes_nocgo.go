@@ -27,8 +27,7 @@ var (
 // *sqlite.Error is a POINTER type with a Code() accessor that returns the
 // extended code.
 func extendedCode(err error) (int, bool) {
-	var e *mod.Error
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[*mod.Error](err); ok {
 		return e.Code(), true
 	}
 	return 0, false
