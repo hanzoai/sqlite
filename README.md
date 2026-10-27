@@ -9,7 +9,7 @@ exposes the same API either way:
 | Build | Backend | Encryption | Use |
 |-------|---------|------------|-----|
 | `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | mattn/go-sqlite3 → SQLCipher | AES-256 page-level, at rest | **production** |
-| `CGO_ENABLED=0` | modernc.org/sqlite (pure Go) | none | CI tests / lint / local dev |
+| `CGO_ENABLED=0` | modernc.org/sqlite (pure Go) | AES-256, at rest | CI tests / lint / local dev |
 
 One import, one driver name, two backends:
 
@@ -19,10 +19,11 @@ import _ "github.com/hanzoai/sqlite" // registers "sqlite" under both tags
 db, _ := sql.Open("sqlite", dsn)     // mattn+SQLCipher (cgo) or modernc (!cgo)
 ```
 
-The pure-Go backend **cannot encrypt**. Demanding a key on it
-(`Open(path, WithKey(...))`, `OpenDB(path, key)`) returns
-`ErrEncryptionUnavailable` and writes nothing — it never silently persists
-plaintext.
+A keyed store is encrypted on **every** build, including the pure-Go
+backend. Pass a raw 256-bit key via `WithRawKey` or the `key=x'HEX'` DSN
+parameter and the driver encrypts at rest regardless of `CGO_ENABLED`.
+`TestEncryptionProof` asserts real ciphertext on disk and a working keyed
+reopen under both backends.
 
 ## Building the encrypted (production) backend — READ THIS
 
@@ -66,26 +67,18 @@ keyed reopen, so a mis-linked build **fails CI** instead of shipping plaintext.
 - Algorithm: AES-256 (SQLCipher 4 defaults: 4096-byte pages, PBKDF2-HMAC-SHA512,
   256000 iters, per-page HMAC-SHA512).
 - Key: raw 256-bit (no passphrase KDF) via `WithRawKey` / the `key=x'HEX'` DSN
-  param, or derived per principal:
+  param:
 
 ```go
-// CEK = HKDF-SHA256(masterKey, "{org|user}:{id}")
-db, _ := sqlite.Open("data.db", sqlite.WithPrincipalKey(masterKey, sqlite.PrincipalOrg, "acme"))
+db, _ := sqlite.Open("data.db", sqlite.WithRawKey(masterKey))
 
 // Or get a *sql.DB to hand to xorm.NewEngineWithDB:
-cek, _ := sqlite.DeriveKey(masterKey, sqlite.PrincipalOrg, "acme")
-sqldb, _ := sqlite.OpenDB(dbPath, cek)
+sqldb, _ := sqlite.OpenDB(dbPath, masterKey)
 eng, _ := xorm.NewEngineWithDB("sqlite", "", core.FromDB(sqldb))
 ```
 
-Different orgs/users get different CEKs (domain-separated `info`); destroying the
-master key renders every derived CEK irrecoverable.
-
-## Per-principal CEK
-
-`DeriveKey(masterKey, principalType, principalID)` → 32-byte CEK via HKDF-SHA256.
-Master key is 32 bytes, sourced from KMS. Used for per-org and per-user database
-isolation in IAM, KMS, and other Hanzo services.
+The master key is 32 bytes, sourced from KMS. Destroying the master key renders
+the database irrecoverable.
 
 ## Threshold write attestation
 
