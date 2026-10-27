@@ -37,10 +37,10 @@
 // It does NOT change the encryption guarantee: the pure-Go backend also always
 // encrypts a keyed store, via the same codec.
 //
-// The encryption key, replication mode, threshold config, and per-principal CEK
-// derivation (cek.go, threshold.go) and the codec envelope (envelope.go) are pure
-// Go and tag-neutral; only the driver registration and the DSN pragma syntax differ
-// by build tag (driver_cgo.go / driver_nocgo.go).
+// The encryption key handling, replication mode, threshold config (threshold.go),
+// and the codec envelope (envelope.go) are pure Go and tag-neutral; only the
+// driver registration and the DSN pragma syntax differ by build tag
+// (driver_cgo.go / driver_nocgo.go).
 package sqlite
 
 import (
