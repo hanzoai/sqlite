@@ -69,14 +69,18 @@ keyed reopen, so a mis-linked build **fails CI** instead of shipping plaintext.
   param, or derived per principal:
 
 ```go
-// CEK = HKDF-SHA256(masterKey, "{org|user}:{id}")
-db, _ := sqlite.Open("data.db", sqlite.WithPrincipalKey(masterKey, sqlite.PrincipalOrg, "acme"))
+db, err := sqlite.Open("data.db", sqlite.WithKey("passphrase"))
 
-// Or get a *sql.DB to hand to xorm.NewEngineWithDB:
-cek, _ := sqlite.DeriveKey(masterKey, sqlite.PrincipalOrg, "acme")
-sqldb, _ := sqlite.OpenDB(dbPath, cek)
-eng, _ := xorm.NewEngineWithDB("sqlite", "", core.FromDB(sqldb))
+// … or a raw 256-bit key:
+// db, err := sqlite.Open("data.db", sqlite.WithRawKey(rawKey256))
+
+// Need a *sql.DB for xorm:
+sqldb, err := sqlite.OpenDB("data.db", rawKey256)
 ```
+
+Every symbol above is exported by this package (`Open`, `WithKey`, `WithRawKey`,
+`OpenDB`). Per-principal key derivation (`DeriveKey` / `WithPrincipalKey`) is
+**not implemented yet** — see the note below before relying on it.
 
 Different orgs/users get different CEKs (domain-separated `info`); destroying the
 master key renders every derived CEK irrecoverable.
