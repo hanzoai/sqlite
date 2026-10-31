@@ -19,12 +19,10 @@ import _ "github.com/hanzoai/sqlite" // registers "sqlite" under both tags
 db, _ := sql.Open("sqlite", dsn)     // hanzoai/csqlite (cgo) or modernc (pure Go)
 ```
 
-A keyed store is encrypted under **both** `CGO_ENABLED=1` and `CGO_ENABLED=0`. The
-pure-Go backend encrypts through the `hanzoai/sqlcipher` codec envelope: a keyed
-open decrypts the file to a RAM-backed plaintext copy, the engine reads and writes
-that copy, and `Close`/`Checkpoint` re-encrypts it to the real path.
-`EncryptionAvailable()` therefore reports `true` on every build, and there is no
-build tag or environment switch under which a keyed store is written as plaintext.
+A keyed store encrypts under both `CGO_ENABLED=1` and `CGO_ENABLED=0`. On the
+pure-Go build the `hanzoai/sqlcipher` codec does it: a keyed open decrypts to a
+RAM-backed copy, and `Close`/`Checkpoint` re-encrypts it to the real path.
+`EncryptionAvailable()` is always true.
 
 ## Building the encrypted (production) backend — READ THIS
 
@@ -79,17 +77,14 @@ db, _ := sqlite.Open("data.db", sqlite.WithRawKey(key))
 sqldb, _ := sqlite.OpenDB(dbPath, key)
 ```
 
-A key must be exactly 32 bytes; the keyed-open funnel rejects any other length
-rather than letting SQLCipher reinterpret it as a passphrase. `WithKey(passphrase)`
-exists but hashes with a single unsalted SHA-256, so it is safe only for a
-high-entropy secret — for a human-memorable passphrase, derive a key out of band
-with argon2id or PBKDF2 and hand it to `WithRawKey`.
+A key must be exactly 32 bytes or the open fails. `WithKey(passphrase)` hashes
+with one unsalted SHA-256, so it is safe only for a high-entropy secret; for a
+memorable passphrase, derive 32 bytes yourself with argon2id or PBKDF2 and pass
+them to `WithRawKey`.
 
-Per-principal isolation (one key per org or per user) is done **outside this
-package**: derive a distinct 32-byte key per principal with your own KDF — for
-example HKDF-SHA256 over a KMS master key — and pass it to `WithRawKey` or
-`OpenDB`. This package holds no master key and derives nothing from a principal
-identifier.
+Per-principal keys (one per org or user) are derived outside this package: run
+your own KDF over a KMS master key, for example HKDF-SHA256, and pass the 32
+bytes to `WithRawKey` or `OpenDB`.
 
 ## Threshold write attestation
 
