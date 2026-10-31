@@ -8,21 +8,23 @@ exposes the same API either way:
 
 | Build | Backend | Encryption | Use |
 |-------|---------|------------|-----|
-| `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | mattn/go-sqlite3 → SQLCipher | AES-256 page-level, at rest | **production** |
-| `CGO_ENABLED=0` | modernc.org/sqlite (pure Go) | none | CI tests / lint / local dev |
+| `CGO_ENABLED=1` + `-tags libsqlite3` + libsqlcipher | hanzoai/csqlite → live SQLCipher | AES-256 page-level, at rest | **production** |
+| `CGO_ENABLED=0` (or `-tags sqlite_purego`) | modernc.org/sqlite (pure Go) | AES-256 at rest, via the pure-Go SQLCipher codec envelope | CI tests / lint / local dev, and any keyed store |
 
 One import, one driver name, two backends:
 
 ```go
 import _ "github.com/hanzoai/sqlite" // registers "sqlite" under both tags
 
-db, _ := sql.Open("sqlite", dsn)     // mattn+SQLCipher (cgo) or modernc (!cgo)
+db, _ := sql.Open("sqlite", dsn)     // hanzoai/csqlite (cgo) or modernc (pure Go)
 ```
 
-The pure-Go backend **cannot encrypt**. Demanding a key on it
-(`Open(path, WithKey(...))`, `OpenDB(path, key)`) returns
-`ErrEncryptionUnavailable` and writes nothing — it never silently persists
-plaintext.
+A keyed store is encrypted under **both** `CGO_ENABLED=1` and `CGO_ENABLED=0`. The
+pure-Go backend encrypts through the `hanzoai/sqlcipher` codec envelope: a keyed
+open decrypts the file to a RAM-backed plaintext copy, the engine reads and writes
+that copy, and `Close`/`Checkpoint` re-encrypts it to the real path.
+`EncryptionAvailable()` therefore reports `true` on every build, and there is no
+build tag or environment switch under which a keyed store is written as plaintext.
 
 ## Building the encrypted (production) backend — READ THIS
 
@@ -65,27 +67,29 @@ keyed reopen, so a mis-linked build **fails CI** instead of shipping plaintext.
 
 - Algorithm: AES-256 (SQLCipher 4 defaults: 4096-byte pages, PBKDF2-HMAC-SHA512,
   256000 iters, per-page HMAC-SHA512).
-- Key: raw 256-bit (no passphrase KDF) via `WithRawKey` / the `key=x'HEX'` DSN
-  param, or derived per principal:
+- Key: raw 256-bit, supplied three equivalent ways — `WithRawKey(key)`,
+  `OpenDB(path, key)`, or the `key=x'HEX'` DSN param:
 
 ```go
-// CEK = HKDF-SHA256(masterKey, "{org|user}:{id}")
-db, _ := sqlite.Open("data.db", sqlite.WithPrincipalKey(masterKey, sqlite.PrincipalOrg, "acme"))
+key := make([]byte, 32) // 32 bytes from KMS or any CSPRNG — not a passphrase
 
-// Or get a *sql.DB to hand to xorm.NewEngineWithDB:
-cek, _ := sqlite.DeriveKey(masterKey, sqlite.PrincipalOrg, "acme")
-sqldb, _ := sqlite.OpenDB(dbPath, cek)
-eng, _ := xorm.NewEngineWithDB("sqlite", "", core.FromDB(sqldb))
+db, _ := sqlite.Open("data.db", sqlite.WithRawKey(key))
+
+// Or get a *sql.DB for a library that wants one:
+sqldb, _ := sqlite.OpenDB(dbPath, key)
 ```
 
-Different orgs/users get different CEKs (domain-separated `info`); destroying the
-master key renders every derived CEK irrecoverable.
+A key must be exactly 32 bytes; the keyed-open funnel rejects any other length
+rather than letting SQLCipher reinterpret it as a passphrase. `WithKey(passphrase)`
+exists but hashes with a single unsalted SHA-256, so it is safe only for a
+high-entropy secret — for a human-memorable passphrase, derive a key out of band
+with argon2id or PBKDF2 and hand it to `WithRawKey`.
 
-## Per-principal CEK
-
-`DeriveKey(masterKey, principalType, principalID)` → 32-byte CEK via HKDF-SHA256.
-Master key is 32 bytes, sourced from KMS. Used for per-org and per-user database
-isolation in IAM, KMS, and other Hanzo services.
+Per-principal isolation (one key per org or per user) is done **outside this
+package**: derive a distinct 32-byte key per principal with your own KDF — for
+example HKDF-SHA256 over a KMS master key — and pass it to `WithRawKey` or
+`OpenDB`. This package holds no master key and derives nothing from a principal
+identifier.
 
 ## Threshold write attestation
 
